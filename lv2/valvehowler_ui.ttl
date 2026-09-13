@@ -1,0 +1,60 @@
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix opts: <http://lv2plug.in/ns/ext/options#> .
+@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
+@prefix urid: <http://lv2plug.in/ns/ext/urid#> .
+
+# Valve Howler's UI — the design handoff's «NLS Cream» pedal.
+#
+# A hand-drawn Cairo panel in a FIXED-size X11 window; the host drives it
+# through the `idle` interface and it is never resized.
+#
+# ⚠️ The UI's URI hangs off the plugin's with `#ui`, same convention as
+# `TheOmegaCake`. PERMANENT for the same reason as the plugin's.
+<https://nylarea.com/plugins/valvehowler#ui>
+    a ui:X11UI ;
+    ui:binary <valvehowler_ui.so> ;
+
+    lv2:requiredFeature ui:idleInterface ;
+    lv2:extensionData   ui:idleInterface ;
+
+    # ⭐ `ui:touch` — the gap `DISENO_DE_INTERFACES.md` §6 marks as "the
+    # one that hurts, and it is PRODUCT": 0 uses in the audited workshop
+    # GUIs. Without it the host cannot know a knob gesture began, and
+    # neither touch-mode automation nor MIDI-learn behave. OPTIONAL: a
+    # host that lacks it still loads the GUI.
+    #
+    # ⭐ `ui:scaleFactor` (via `opts:options` + `urid:map`) — the host
+    # SAYS the HiDPI scale instead of us guessing it from Cairo's matrix.
+    lv2:optionalFeature ui:noUserResize ,
+                        ui:resize ,
+                        ui:touch ,
+                        opts:options ,
+                        urid:map ;
+    opts:supportedOption ui:scaleFactor ;
+
+    # Which ports the UI subscribes to: the five it draws or edits — the
+    # three knobs, the footswitch and the variant.
+    # ⛔ `latency` and `oversampling` are absent ON PURPOSE — the GUI does
+    # not show them, and subscribing to an undrawn port asks the host to
+    # wake the UI for nothing.
+    ui:portNotification [
+        ui:plugin <https://nylarea.com/plugins/valvehowler> ;
+        lv2:symbol "drive" ;
+        ui:protocol ui:floatProtocol
+    ] , [
+        ui:plugin <https://nylarea.com/plugins/valvehowler> ;
+        lv2:symbol "tone" ;
+        ui:protocol ui:floatProtocol
+    ] , [
+        ui:plugin <https://nylarea.com/plugins/valvehowler> ;
+        lv2:symbol "level" ;
+        ui:protocol ui:floatProtocol
+    ] , [
+        ui:plugin <https://nylarea.com/plugins/valvehowler> ;
+        lv2:symbol "enabled" ;
+        ui:protocol ui:floatProtocol
+    ] , [
+        ui:plugin <https://nylarea.com/plugins/valvehowler> ;
+        lv2:symbol "variant" ;
+        ui:protocol ui:floatProtocol
+    ] .

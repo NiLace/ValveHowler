@@ -1,0 +1,17 @@
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
+
+<https://nylarea.com/plugins/valvehowler>
+    a lv2:Plugin ;
+    lv2:binary <valvehowler.so> ;
+    rdfs:seeAlso <valvehowler.ttl> .
+
+# The GUI is a SEPARATE MODULE the host loads beside the DSP, and this
+# manifest entry is what lets it be found. Without it the plugin loads
+# with the host's generic interface and the GUI raises no error: it
+# simply does not appear.
+<https://nylarea.com/plugins/valvehowler#ui>
+    a ui:X11UI ;
+    ui:binary <valvehowler_ui.so> ;
+    rdfs:seeAlso <valvehowler_ui.ttl> .

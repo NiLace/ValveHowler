@@ -1,0 +1,183 @@
+@prefix doap:  <http://usefulinc.com/ns/doap#> .
+@prefix foaf:  <http://xmlns.com/foaf/0.1/> .
+@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ui:    <http://lv2plug.in/ns/extensions/ui#> .
+
+# Valve Howler — an overdrive modelled from the circuit.
+#
+# Independent product, NOT affiliated with any pedal manufacturer.
+# The mode labels describe topology, not brands (brief §9).
+#
+# The URI <https://nylarea.com/plugins/valvehowler> is a PERMANENT
+# identifier, following the convention NLConv already uses. It can change
+# up to the first release and NEVER after (brief §8).
+
+# The maintainer hangs off the PROJECT, not the plugin: doap:maintainer's
+# domain is doap:Project, and hanging it off the plugin is an RDF error
+# `lv2_validate` flags. And lv2:project demands a declared doap:Project.
+# `doap:license` HANGS OFF THE PROJECT, like the maintainer, and for the
+# same RDF reason: its domain is `doap:Project`. The licence was once DECIDED
+# (GPL-3) and existed in no artifact at all -- not here, not as a LICENSE file. A decision that reaches no artifact has not
+# happened for whoever receives the plugin: the host cannot show it and
+# whoever clones the repo cannot read it.
+<https://nylarea.com/nlsounds>
+    a doap:Project ;
+    doap:name "NL Sounds" ;
+    doap:license <http://opensource.org/licenses/gpl-3.0> ;
+    doap:maintainer [ a foaf:Person ; foaf:name "NL Sounds" ;
+                      foaf:mbox <mailto:nilace@nylarea.com> ] .
+
+<https://nylarea.com/plugins/valvehowler>
+    a lv2:Plugin, lv2:DistortionPlugin ;
+    doap:name "Valve Howler" ;
+    lv2:project <https://nylarea.com/nlsounds> ;
+
+    # VERSION. A versioned LV2 resource MUST carry one ("Releases of
+    # plugins and extensions MUST be explicitly versioned",
+    # lv2core.meta.ttl).
+    #
+    # There is NO major version in LV2: the URI IS the major version,
+    # which is why changing it is the only irreversible act.
+    #
+    # THAT DOOR IS NOW SHUT. This used to say `minorVersion 0`,
+    # which the spec gives a HARD meaning — "Minor version zero is a special
+    # case for pre-release development... Hosts SHOULD NOT expect such a plugin
+    # to remain compatible with any future version" — i.e. the machine-readable
+    # declaration that ports and symbols could still move. Release 1.0.0 closes
+    # it, and LV2 closes it, not us: "All versions of a plugin with a given URI
+    # MUST have the same set of mandatory ports with respect to lv2:symbol".
+    #
+    # => From here on a symbol rename is not a decision, it is a spec violation,
+    # and the symptom at the user's end is the host loading the DEFAULT with no
+    # error at all. The frozen set is these EIGHT: in · out · drive · tone ·
+    # level · latency · enabled · variant. The `seed` port that an older note
+    # said had index 10 reserved was dropped together with `engine`;
+    # `src/nls_iface.h` has carried PORT_COUNT = 8 ever since.
+    #
+    # The public version is 1.0.0 and LV2 can only express two numbers: the
+    # leading 1 is carried by the URI, which IS the major version, and the 0.0
+    # is what these two lines say. They are the same statement, not two.
+    lv2:minorVersion 1 ;
+    lv2:microVersion 0 ;
+
+    lv2:optionalFeature lv2:hardRTCapable ;
+
+    # THE LINK TO THE GUI — without this line THERE IS NO GUI.
+    # Declaring it in `manifest.ttl` only makes it visible as a loose
+    # resource: what HANGS it off the plugin is this `ui:ui`. Without it,
+    # `lilv_plugin_get_uis()` returns empty, Ardour opens the plugin with
+    # the generic knob interface and raises no error — the failure is
+    # exactly "it does not appear and you do not know why".
+    # `make gui-lint` caught it, which is what it exists for.
+    ui:ui <https://nylarea.com/plugins/valvehowler#ui> ;
+
+    lv2:port [
+        a lv2:AudioPort, lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "in" ; lv2:name "In"
+    ] , [
+        a lv2:AudioPort, lv2:OutputPort ;
+        lv2:index 1 ; lv2:symbol "out" ; lv2:name "Out"
+    ] , [
+        # Knob 0..1. The LAW (knob -> ohms) lives in the parameter layer,
+        # NOT in the circuit model (brief §3.1). The solver receives ohms.
+        a lv2:ControlPort, lv2:InputPort ;
+        lv2:index 2 ; lv2:symbol "drive" ; lv2:name "Drive" ;
+        lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+    ] , [
+        a lv2:ControlPort, lv2:InputPort ;
+        lv2:index 3 ; lv2:symbol "tone" ; lv2:name "Tone" ;
+        lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+    ] , [
+        a lv2:ControlPort, lv2:InputPort ;
+        lv2:index 4 ; lv2:symbol "level" ; lv2:name "Level" ;
+        lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+    ] , [
+        # LATENCY. The host reads it to compensate the delay; without it,
+        # anyone mixing in parallel with the dry signal eats a comb
+        # filter.
+        #
+        # It is CONSTANT in the product: 7 samples (`taps-1`, with 8 taps) at
+        # every internal factor. This used to claim it changes with the
+        # knob, and it does not: the only factor giving 0 is 1×, which
+        # cannot be chosen. Published every block for robustness, not
+        # because the knob moves it.
+        a lv2:ControlPort, lv2:OutputPort ;
+        lv2:index 5 ; lv2:symbol "latency" ; lv2:name "Latency" ;
+        lv2:designation lv2:latency ;
+        lv2:portProperty lv2:reportsLatency, lv2:integer ;
+        lv2:minimum 0 ; lv2:maximum 64
+    ] , [
+        # THE GUI's 3PDT FOOTSWITCH (design handoff).
+        #
+        # `lv2:enabled` is the STANDARD bypass designation: 1 = the plugin
+        # processes, 0 = signal passes. Chosen over a custom control so
+        # the host sees it too and can automate it as bypass — an invented
+        # boolean would be a second switch the host does not understand.
+        #
+        # IN BYPASS THE SIGNAL LEAVES DELAYED by the same samples
+        # `latency` declares, and it is no oversight: the host compensates
+        # latency ALWAYS, it does not re-ask on stomp. Passing `in`
+        # straight through, the dry side would come out EARLY and a
+        # parallel mix eats the comb filter the latency port exists to
+        # avoid.
+        #
+        # And it does not switch dry: a 512-sample fade (~10,7 ms at
+        # 48 kHz) runs both ways. The engine is BIASED — its resting
+        # output is not zero — so the jump would be audible even with no
+        # signal.
+        a lv2:ControlPort, lv2:InputPort ;
+        lv2:index 6 ; lv2:symbol "enabled" ; lv2:name "Enabled" ;
+        lv2:designation lv2:enabled ;
+        lv2:portProperty lv2:toggled ;
+        lv2:default 1 ; lv2:minimum 0 ; lv2:maximum 1
+    ] , [
+        # THE CIRCUIT VARIANT — the GUI's dropdown.
+        #
+        # TWO CIRCUITS, AND THAT IS NO PLACEHOLDER: they are the ones
+        # the workshop has CLOSED WITH SOURCES. (Rows are not circuits: a row
+        # is a CIRCUIT plus a KNOB LAW, which is how `OD-8 Tone` exists
+        # without a third circuit — see `nls_variantes.h`.) `docs/VARIANTES.md`
+        # closes the axis of the two output resistors (§1, three sources:
+        # Keen's table verified to the text, the board photo in Wampler's
+        # book p. 255, and the netlist) and leaves the other two axes
+        # EMPTY (each model's opamp, and the 5's bias).
+        #
+        # Models 9, 9RI and 5 are ELECTRICALLY IDENTICAL in our model —
+        # what would separate them is the opamp, and there is no
+        # macromodel for that — so they share ONE entry with a label
+        # saying so. Exposing them as three modes that sound the same
+        # would be a dead control with three names, which is exactly what
+        # was retired with `model` and `clipping`.
+        #
+        # The "10" is NOT here: it demands a new element (`RA`) whose
+        # value is still disputed between sources (Keen 1 kΩ, others
+        # 220 Ω -> VERIFICACION_NETLIST §13).
+        #
+        # It is an INDEX, not a physical value: new variants are
+        # APPENDED AT THE END or saved sessions change circuit.
+        a lv2:ControlPort, lv2:InputPort ;
+        lv2:index 7 ; lv2:symbol "variant" ; lv2:name "Variant" ;
+        lv2:default 0 ; lv2:minimum 0 ; lv2:maximum 3 ;
+        lv2:portProperty lv2:integer, lv2:enumeration ;
+        # THE LABELS ARE `src/nls_variantes.h`'s, LETTER FOR LETTER. It
+        # is the one copy of that table that cannot include the header, so
+        # it is the one that drifts silently. Touch one, touch the other.
+        lv2:scalePoint [ rdfs:label "OD-8 W Tone" ; rdf:value 0 ] ;
+        lv2:scalePoint [ rdfs:label "OD-9 W Tone"        ; rdf:value 1 ] ;
+        # NOT A NEW CIRCUIT — the 808's, with the TONE knob's travel
+        # redistributed so the dB come out even across the sweep. The circuit
+        # concentrates its whole tone effect in the pot's last quarter (the
+        # last tenth carries 67,2 % of the range) and the real G taper
+        # aggravates it; this law spreads it. On this row the knob position
+        # NO LONGER corresponds to the real pot's rotation — which is exactly
+        # why the faithful rows keep the pot's taper and this one is its own
+        # entry.
+        lv2:scalePoint [ rdfs:label "OD-8 L Tone" ; rdf:value 2 ] ;
+        # The same law over the other circuit — the rows are a CIRCUIT times a
+        # KNOB LAW, so both circuits get both laws. One table serves both: the
+        # tone stage does not depend on the variant.
+        lv2:scalePoint [ rdfs:label "OD-9 L Tone" ; rdf:value 3 ]
+
+    ] .
