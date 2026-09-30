@@ -1,31 +1,29 @@
-// The OD-8's MNA engine: modified nodal analysis + Newton per sample.
+// The OD-8 circuit's MNA engine: modified nodal analysis + Newton per sample.
 //
-// A port of `harness/mna_proto.py`, where it was validated
-// (docs/MNA_RESULTADO.md): rest at 1,82 µV over 33 unknowns and the output
-// nulled at −82,5 dB with 8x oversampling and −94,6 dB with 16x, against a
-// −80 dB target.
+// A port of a 33-unknown prototype that was validated against ngspice: rest
+// point within 1.82 µV, output null −82.5 dB with 8x oversampling and
+// −94.6 dB with 16x. Those figures are the prototype's; this engine has 29
+// unknowns and different device cards, and they were not re-measured on it.
 //
 // ## Why this formulation and not a cascade
 //
 // A `filter -> waveshaper -> filter` cascade cannot reproduce the rest-point
-// displacement: it is 2,4 nA over 2266 nA, and rebuilding it by subtracting
-// models demands >60 dB of precision where no route passes −34 dB
-// (docs/DESPLAZAMIENTO_DE_REPOSO.md §6). Here `n3 = vr − R2·ib` is IMPOSED
-// by construction and the displacement falls out by itself: DC error
-// −102 dB against the cascade's −50 dB.
+// displacement: it is 2.4 nA over 2266 nA, and rebuilding it by subtracting
+// models demands more than 60 dB of precision. Here `n3 = vr − R2·ib` is
+// imposed by construction and the displacement follows: DC error −102 dB
+// against the cascade's −50 dB.
 //
 // ## Real-time contract
 //
 // No allocation, no exceptions, no locks: all state is fixed-size arrays.
-// The only variability is the Newton iteration count, which is bounded and
-// accounted.
+// The only variability is the Newton iteration count, which is bounded.
 
 #pragma once
 
-// HERE `nlsc::` NAMES CARRY NO LEADING `::`, and it is no oversight.
-// This header also compiles inside an ISA namespace (`nls_isa_tu.cpp`). With
-// `::nlsc::fast::exp_` the name points OUTSIDE that namespace, where it does
-// not exist; without the `::` it resolves in both contexts.
+// Here `nlsc::` names carry no leading `::`. This header also compiles inside
+// an ISA namespace (`nls_isa_tu.cpp`): `::nlsc::fast::exp_` would point
+// outside that namespace, where it does not exist; without the `::` the name
+// resolves in both contexts.
 
 // The potentiometer's residual resistance (ohms). See the note next to `eps`.
 #ifndef NLSC_POT_EPS
@@ -38,20 +36,10 @@
 #include <cstring>
 #include "nls_fastmath.h"
 
-// Switch for the fast transcendentals (`nls_fastmath.h`). Kept as a switch
-// rather than a plain substitution so a RE-NULL against libm stays possible:
-// `-DNLSC_FAST_EXP=0 -DNLSC_FAST_TANH=0` returns to glibc.
-// (This used to cite `-DNLSC_FASTMATH=0`, a macro that does NOT exist in the
-// repo: the recipe would have done nothing and the "against libm" null would
-// have come out identical — the worst way to fail.)
-// PER-FUNCTION switches, and the defaults are MEASURED, not chosen: nine
-// paired rounds (same round, alternated binaries, because between runs this
-// machine drifts 12 %) give
-//
-//     own exp + tanh  ->  −8,8 %   (negative in all NINE rounds)
-//     own pow         ->  +2,2 %   (loses: glibc's `pow` is better)
-//
-// Hence `pow` stays on libm. See `docs/TRANSCENDENTALES.md`.
+// Per-function switches for the fast transcendentals (`nls_fastmath.h`);
+// `-DNLSC_FAST_EXP=0 -DNLSC_FAST_TANH=0` returns to libm. The own exp and
+// tanh are faster than glibc's (−8.8 % of clock together); the own `pow` is
+// not (+2.2 %), so `pow` stays on libm.
 #ifndef NLSC_FAST_EXP
 #define NLSC_FAST_EXP 1
 #endif
@@ -71,50 +59,26 @@
 #else
 #  define NLSC_POWNEG(u,m) std::pow((u), -(m))
 #endif
-// A7: u^(−m) by range reduction + exponent table. It needs the `Junc` (its
-// fitted coefficients live inside), so it gets its own macro.
-// Default 1: MEASURED with both instruments at once — paired clock −13,46 %
-// (21/21 pairs, sign test p = 4,8e-7) and instructions −14,3 % on the
-// engine, with accumulated quality IDENTICAL (±0,000 dB of ANMR at four
-// travel points). `-DNLSC_POW_RANGE=0` returns to `std::pow`.
+// u^(−m) by range reduction + exponent table (`Junc::powneg`). It needs the
+// `Junc` (its fitted coefficients live inside), so it has its own macro. It
+// is faster than `std::pow` (−13.5 % of clock on the engine) with no
+// measurable change in output quality. `-DNLSC_POW_RANGE=0` returns to
+// `std::pow`.
 #ifndef NLSC_POW_RANGE
 #define NLSC_POW_RANGE 1
 #endif
 
-// THIS `#define` USED TO LIVE INSIDE `qjunc`'s BODY, BELOW ITS FIRST USE.
-// It works for the preprocessor and it stops working the moment the switch
-// becomes a template default, which is what it is now — and the failure mode of
-// a `#define` under its use is that the function quietly takes the other branch
-// silently. It is the
-// DEFAULT of `qjunc`'s `LIN` parameter, so the cascade keeps the linearised
-// depletion capacitance it was measured with (−7,46 % of clock); the DK asks
-// for the exact law explicitly, because it is the ARBITER and does not ship.
-// The switch goes ABOVE, not next to its use: a `#define` below where it is
-// used switches the function off IN SILENCE.
-// MEASURED AND REJECTED — it stays off and WITH THE MEASUREMENT BESIDE IT,
-// which is what stops anybody estimating it again from scratch.
-//
-// `qb` is used as a divisor THREE times (`ict/qb` and two `/(qb*qb)`), and a
-// double division is ~14 badly pipelined cycles. Hoisting it to ONE reciprocal
-// looked free.
-// Measured PAIRED over the real DI, 21 alternating pairs, `taskset -c 3,9`,
-// with both arms on paths of EQUAL LENGTH and in the same directory, because
-// the file NAME changes the measurement:
-//
-//     median reciprocal   2,6584 %      median three divisions   2,6453 %
-//     THE THREE DIVISIONS win 11 of 21 pairs   ·   p = 1
-//     bench floor 0,0038 %  => NOT a lack of resolution: the bench could see it
-//
-// => **It buys nothing**, and if anything the sign points the other way. The
-// usual version ships. Positive control: with `=1` the `.so` comes out
-// md5-IDENTICAL to the one that ships, so arm A was the only difference.
-// And the likely reason: the hot spot was not the assumed one — a census BY
-// CLASS says THAT there are too many divisions, but only `perf annotate -l`
-// says WHICH.
+// `NLSC_BJT_DIV` selects how `bjt()` divides by `qb`: 1 (the default) keeps
+// the three divisions, 0 uses one reciprocal. The reciprocal is not faster in
+// practice, so the divisions stay.
 #ifndef NLSC_BJT_DIV
-#define NLSC_BJT_DIV 1      // 1 = three divisions, WHAT SHIPS · 0 = one reciprocal (rejected)
+#define NLSC_BJT_DIV 1      // 1 = three divisions (default) · 0 = one reciprocal
 #endif
 
+// `NLSC_JUNC_LIN` is the default of `qjunc`'s `LIN` template parameter: the
+// linearised depletion capacitance (see `qjunc`). `nls_dk.h` requests the
+// exact law explicitly. The switch is defined above its first use: a
+// `#define` placed below it would silently select the other branch.
 #ifndef NLSC_JUNC_LIN
 #define NLSC_JUNC_LIN 1
 #endif
@@ -132,83 +96,38 @@
 
 namespace nlsc {
 
-#ifdef NLSC_PROBE_U
-// Probe of `u`'s range in `qjunc`, to size a range-reduction approximation
-// of u^(−m). It sits INSIDE the solver, so it also sees the TRIALS Newton
-// rejects. Here that is CORRECT, not a defect: the approximation must be
-// valid at every point it is ever evaluated, accepted or not.
-// Never in a timed build: this probe only exists under -DNLSC_PROBE_U,
-// which the bundle does NOT define.
-struct ProbeU {
-    double lo = 1e300, hi = -1e300;
-    long   n = 0, ehist[64] = {0};
-    double mlo = 1e300, mhi = -1e300;
-    ~ProbeU()
-    {
-        if (!n) { std::fprintf(stderr, "[probe_u] no samples\n"); return; }
-        std::fprintf(stderr, "[probe_u] n=%ld  u ∈ [%.6g, %.6g]  m ∈ [%.4f, %.4f]\n",
-                     n, lo, hi, mlo, mhi);
-        std::fprintf(stderr, "[probe_u] frexp exponents with counts:\n");
-        for (int i = 0; i < 64; ++i)
-            if (ehist[i])
-                std::fprintf(stderr, "    e=%+3d  %10ld  (%.3f %%)\n",
-                             i - 32, ehist[i], 100.0 * double(ehist[i]) / double(n));
-    }
-};
-inline ProbeU g_probe_u;
-inline void probe_u(double u, double m)
-{
-    ProbeU& p = g_probe_u;
-    ++p.n;
-    if (u < p.lo) p.lo = u;
-    if (u > p.hi) p.hi = u;
-    if (m < p.mlo) p.mlo = m;
-    if (m > p.mhi) p.mhi = m;
-    int e; std::frexp(u, &e);
-    int idx = e + 32;
-    if (idx >= 0 && idx < 64) ++p.ehist[idx];
-}
-#endif
 
 namespace mna {
 
 // ---------------------------------------------------------------------------
-// Physical constants and model cards — CIRCUIT data, not fits
+// Physical constants and model cards — circuit data, not fits
 // ---------------------------------------------------------------------------
-// Thermal voltage DERIVED, not copied: k·T/q at 300,15 K (ngspice's TNOM).
-// Measured: with the 25,8652e-3 inherited from another project the rest
-// error doubles (6,7 µV vs 1,8 µV).
+// Thermal voltage derived, not copied: k·T/q at 300.15 K (ngspice's TNOM).
 inline constexpr double kBoltz = 1.380649e-23;
 inline constexpr double kQelec = 1.602176634e-19;
 inline constexpr double kTnom  = 300.15;
 inline constexpr double VT     = kBoltz * kTnom / kQelec;
 
-// Precomputed reciprocal of VT. Even with `VT` constexpr, GCC at -O3 EMITS
+// Precomputed reciprocal of VT. Even with `VT` constexpr, GCC at -O3 emits
 // the division: turning it into a multiply requires `-freciprocal-math`,
-// which this project rejects for loosening floating point. Measured: `bjt`
-// drops from 26 to 5 divisions and the clock by 25 %.
+// which this project does not use because it loosens floating point.
 inline constexpr double inv_VT = 1.0 / VT;
 
 inline constexpr double VCC = 9.0;
 
-// 2SC1815 (bin BL) -- the transistor the FACTORY service manual specifies for
-// Q101/Q103, the two emitter followers. The 2N3904 that used to be here is the
-// substitute GGG accepts, and through the whole circuit the two are NOT
-// interchangeable: the Vbe law alone measures -38,92 dB, 21 dB over the -60 dB
-// porting bar. The card, its provenance part by part and what the datasheet
-// does NOT publish are in `harness/spice/equiv/q_2sc1815bl.inc`, which
-// `harness/deriva_2sc1815.py` re-derives from the PDF.
+// 2SC1815 (bin BL) — the transistor the factory service manual specifies for
+// Q101/Q103, the two emitter followers. The 2N3904 is a common substitute but
+// not interchangeable here: the difference in the Vbe law alone leaves a
+// −38.9 dB residual through the whole circuit. The model card is derived from
+// the datasheet. The same card exists as `.model QBUF` in the SPICE netlist
+// and an automated check compares the two, so change both together.
 //
-// This models the 1979 unit. The datasheet says "Not Recommended for New
-// Design" and today's reissues fit a 2N3904, so the pedal on someone's desk
-// need not be this part.
+// This models the original 1979 unit; the datasheet marks the part "Not
+// Recommended for New Design", and reissues fit a 2N3904.
 //
-// `make modelos` compares these numbers against the `.model QBUF` card:
-// the same physics is written twice and nothing else keeps them in step.
-// `NLSC_MNA_RB` -- CONTROL: at 0 it removes the base resistance of both
-// transistors. BOTH copies of the stamp read it (here in `buildConstant` and
-// in `nls_dk.h`), and it goes up here because `nls_dk.h` includes this file:
-// a `#define` below its use switches the function off IN SILENCE.
+// `NLSC_MNA_RB` — at 0 removes the base resistance of both transistors. Both
+// copies of the stamp read it (`buildConstant` here and `nls_dk.h`), and it
+// is defined here because `nls_dk.h` includes this file.
 #ifndef NLSC_MNA_RB
 #define NLSC_MNA_RB 1
 #endif
@@ -220,7 +139,7 @@ struct QModel {
     double CJE = 4.493e-12, MJE = 0.2593, VJE = 0.75;
     double CJC = 4.547e-12, MJC = 0.3085, VJC = 0.75;
     double TF = 1.823e-9, TR = 239.5e-9, FC = 0.5;
-    // Derived values with CONSTANT model denominators: computed once in
+    // Derived values with constant model denominators: computed once in
     // `prepare()` via `derive()`; the hot path only multiplies.
     double inv_NEVT = 0, ISoBF = 0, ISoBR = 0, ISoIKF = 0, inv_VAF = 0,
            TFIS = 0, TRIS = 0;
@@ -230,49 +149,29 @@ struct QModel {
         TFIS     = TF * IS;          TRIS    = TR * IS;
     }
 };
-// MA150 — the clipping diode the factory service manual specifies for D101-D106.
+// MA150 — the clipping diode the factory service manual specifies for
+// D101-D106. It is not interchangeable with a 1N914 at clipping currents:
+// the saturation currents IS agree to 4 %, but the ideality N differs (a
+// softer knee), so the forward-voltage gap grows with current, from 17 mV at
+// 1 uA to 36 mV at 1 mA.
 //
-// WHY THIS AND NOT THE 1N914. The manufacturer's own parts list names the MA150, and
-// the two parts are NOT interchangeable at the currents an overdrive clips at:
-// measured through the whole circuit, swapping them moves the output by
-// 24,7 dB, against a yardstick of 60. What separates them is not IS, which
-// agrees to 4 %, but the ideality N — a softer knee — so the gap GROWS with
-// current, from 17 mV at 1 uA to 36 mV at 1 mA.
+// The datasheet publishes neither IS nor N; both are fitted to its VF-Ta
+// curve, which the fit holds over three decades to under 0.13 mV.
 //
-// The datasheet publishes neither IS nor N, so both are derived from its
-// VF-Ta curve, read by pixel: the fit holds three decades to under 0,13 mV
-// and three independent checks agree. The reading, its controls and the
-// circuit measurement are in docs/VERIFICACION_NETLIST.md; the bench that
-// produced them is harness/spice/equiv/.
-//
-// WHAT IS DERIVED RATHER THAN PUBLISHED, with its size:
+// Derived rather than published:
 //   TT   the sheet gives trr <= 10 ns at IF = IR = 10 mA; trr = TT*ln(1+IF/IR)
-//        puts TT <= 14,4 ns. That formula does NOT reproduce the 1N914 card's
-//        20 ns from its own 4 ns trr, so the two are not derived on the same
-//        basis. It does not decide anything: the whole plausible range, 5 to
-//        40 ns, is worth 0,19 dB.
-//   CJO  the family table says 0,9 typ / 2 max pF while the device's own Ct-VR
-//        curve reads 1,44 pF at low bias — the curve wins, being device
-//        specific, and it is the same convention the 1N914 card used (its 4 pF
-//        is that part's datasheet Ct). The table's typ..max spread is 3,8 dB
-//        on a term already 22 dB under the IS/N one.
-//        Known shape error: the real part's capacitance falls 15,4 % from
-//        0,4 to 6,4 V where this M/VJ pair falls 48,6 %. Most of its Ct is
-//        package, not junction (a split gives 0,52 pF junction over 0,99 pF
-//        fixed). Modelling that needs a capacitor in the netlist, which is a
-//        topology change and a separate decision.
-//   M, VJ  not given by the datasheet at all; inherited from the 1N914 card.
+//        puts TT <= 14.4 ns. The plausible range, 5 to 40 ns, is worth 0.19 dB.
+//   CJO  the device's Ct-VR curve reads 1.44 pF at low bias (the family table
+//        gives 0.9 typ / 2 max pF; the device curve is used). Known shape
+//        error: the real part's capacitance falls 15.4 % from 0.4 to 6.4 V
+//        where this M/VJ pair falls 48.6 %, because most of its Ct is package
+//        capacitance rather than junction.
+//   M, VJ  not given by the datasheet; taken from a standard 1N914 card.
 //
-// `RS` BEHIND A FLAG. The DK models the diode's series resistance with an
-// INTERNAL NODE per diode (`kD[i].a` -> `kD[i].ai`, see `buildConstant()`);
-// the cascade's stage 2 evaluates the pair directly on `w = v5 − v7`, i.e.
-// WITHOUT it. Asking whether that asymmetry is the additive floor requires
-// switching it off ON BOTH SIDES — the negative leg — and without the flag
-// the question could only be answered by writing the model, the expensive
-// order.
-// This macro is the ONE definition of the diode's RS: stage 2 used to carry
-// its own literal copy, and two copies of a value diverge silently the first
-// time one of them is edited.
+// `NLSC_DIODE_RS` is the single definition of the diode's series resistance.
+// This engine and the DK model it with an internal node per diode
+// (`kD[i].a` -> `kD[i].ai`, see `buildConstant()`); the cascade's stage 2
+// evaluates the pair directly on `w = v5 − v7`, without it.
 #ifndef NLSC_DIODE_RS
 #define NLSC_DIODE_RS 1.1
 #endif
@@ -282,20 +181,9 @@ struct DModel {
     double inv_nvt = 0;
     void derive() { inv_nvt = 1.0 / (N * VT); }
 };
-// NJM4558 (docs/handoff/njm4558.sub)
-//
-// THE SLEW RATE, PARAMETRISED — A-ii, and it is a ONE-LINE experiment.
-//
-// The netlist specifies an **RC4558** and we model the **NJM4558**. Their
-// datasheets differ in ONE thing: the slew rate, **1,7 V/us for the RC4558
-// against 1,0 for the NJM4558** (both declare GBW = 3 MHz). Everything else
-// that separates those two chips is manufacturer and package.
-// => This bounds the gap without touching the product: `NLSC_OPAMP_SR` moves
-// the only parameter that distinguishes them, and its default is the usual
-// one, so without asking for anything the `.so` comes out bit-identical.
-// It also serves as the NEGATIVE ARM of `nls_stage2.h`'s slew guard: with
-// an absurdly low SR the counter HAS to fire. A counter that always says 0 is
-// indistinguishable from one that is not looking.
+// NJM4558. The netlist specifies an RC4558; the two datasheets differ only in
+// slew rate (1.7 V/us for the RC4558, 1.0 for the NJM4558; both declare
+// GBW = 3 MHz). `NLSC_OPAMP_SR` sets the slew rate in V/s.
 #ifndef NLSC_OPAMP_SR
 #  define NLSC_OPAMP_SR 1e6
 #endif
@@ -310,7 +198,7 @@ struct OModel {
 };
 
 // ---------------------------------------------------------------------------
-// Nodes. The three FIXED ones (ground, supply, input) are not unknowns:
+// Nodes. The three fixed ones (ground, supply, input) are not unknowns:
 // their KCL is never posed. The rest are, plus one branch current per opamp.
 // ---------------------------------------------------------------------------
 enum Node : int {
@@ -324,120 +212,80 @@ enum Node : int {
     // fixed nodes, encoded with negative indices so `nv()` resolves them
     N_GND = -1, N_VCC = -2, N_IN = -3,
 };
-// The opamps' output sources add NO unknowns.
-//
-// The first formulation gave them an internal node and a branch current, as
-// SPICE would for a generic voltage source. But `Bout` is an IDEAL source to
-// ground whose voltage is a known function of `V(2)`, so substitute and
-// done: `Ro` sits between a known voltage and the output node — a controlled
-// source.
-//
-// It is not just saving 4 of 33 unknowns. A branch current's row HAS NO
-// DIAGONAL, and without a diagonal the minimum-degree reordering picks it
-// first — degree 2 — and pivots on a zero. That cost a 1,77 V null that
-// looked like numerical instability and was one unknown too many.
+// The opamps' output sources add no unknowns. `Bout` is an ideal source to
+// ground whose voltage is a known function of `V(2)`, so it is substituted:
+// `Ro` sits between a known voltage and the output node, a controlled
+// source. Besides saving 4 unknowns, this matters because a branch current's
+// row has no diagonal, and minimum-degree reordering would pick it first
+// (degree 2) and pivot on a zero.
 inline constexpr int N = NUM_NODES;
 
 struct Res  { int a, b; double r; };
 struct Cap  { int a, b; double c; };
 
-// The netlist as DATA. R11 = 1 kΩ, not 10 kΩ: the handoff's netlist had a
-// transcription error, confirmed by five sources
-// (docs/VERIFICACION_NETLIST.md §6).
+// The netlist as data. R11 = 1 kΩ, confirmed by five sources.
 struct Netlist {
-    // `eps` IS NOT PHYSICS: it is the regularisation that keeps a pot off
-    // 0 ohms. And its value MATTERS, because at full knob the branch
-    // collapses to `eps`, and with the capacitor hanging off it that is a
-    // PARASITIC POLE:
+    // `eps` is not physics: it is the regularisation that keeps a pot off
+    // 0 ohms. Its value matters, because at full knob the branch collapses to
+    // `eps`, and with the capacitor hanging off it that is a parasitic pole:
     //
-    //   eps = 1e-3 ohm  ->  tau = 0,22 ns  ->  pole at 723 MHz (1880x Nyquist at 8x)
-    //   eps = 10 ohm    ->  tau = 2,2 us   ->  pole at 72,3 kHz (BELOW Nyquist)
+    //   eps = 1e-3 ohm  ->  tau = 0.22 ns  ->  pole at 723 MHz (1880x Nyquist at 8x)
+    //   eps = 10 ohm    ->  tau = 2.2 us   ->  pole at 72.3 kHz (below Nyquist)
     //
-    // Measured: with 1e-3 the null against ngspice at tone=1,0 drops to
-    // −75,0 dB, 7 dB worse than the rest of the travel, because ngspice
-    // (adaptive step) and we (fixed-step trapezoidal) do not discretise a
-    // 723 MHz pole the same way.
-    //
-    // And a REAL potentiometer never reaches zero: the Bourns PDB24 (24 mm
-    // rotary audio pot, the TS's class) specifies "Residual Resistance:
-    // 10 ohms max." for R < 500 kohm. So 1e-3 sits FOUR ORDERS below what
-    // the manufacturer admits as maximum.
-    // 10 ohm is a sheet LIMIT, not a typical: it serves as the physical
-    // upper bound, with the sensitivity sweep alongside.
+    // A fixed-step trapezoidal solver and an adaptive-step one discretise a
+    // 723 MHz pole differently: at tone = 1.0 the null against ngspice is
+    // −75.0 dB, 7 dB worse than over the rest of the travel. A real
+    // potentiometer never reaches zero: the Bourns PDB24 specifies "Residual
+    // Resistance: 10 ohms max." for R < 500 kohm, so 10 ohm is the physical
+    // upper bound.
     double gain = 0.5, tone = 0.5, lvl = 0.0, eps = NLSC_POT_EPS;
 
-    // THE UNIT SEED.
-    //
-    // `0` = the IDEAL specimen, with the schematic's nominal values — what
-    // the plugin always was and remains the default. Any other value draws
-    // each component's tolerance and produces ONE CONCRETE SPECIMEN, like
-    // pulling another pedal out of the shop's box.
-    //
-    // It rides a PORT, not a momentary button with separate state: the
-    // host stores it with the session for free, and the user's pedal sounds
-    // the same on reopening. A button that drew without saving would be a
-    // different pedal on every project load.
-    //
-    // Bands MEASURED and declared in `harness/tolerancias.py`: two factory
-    // units separate by ~16 % at the tone corner and ~1,5 dB at the peak.
-    // The bands are declared assumption (the maker publishes no
-    // tolerances), not source data.
+    // The unit seed. `0` is the ideal unit, with the schematic's nominal values
+    // (the default). Any other value draws each component's tolerance and
+    // produces one concrete unit. The tolerance bands are assumptions: the maker
+    // publishes none.
     unsigned seed = 0;
 
-    // THE VARIANT AXIS — the TWO output resistors (the netlist's `R14`
-    // series and `R15` shunt). They are DATA, not a code branch: changing
-    // them touches no topology, so the LU's sparsity pattern and the
-    // generated code (`nls_dk_elim_gen.h`) remain valid as they are.
+    // The variant axis — the two output resistors (the netlist's `R14` series
+    // and `R15` shunt). They are data, not a code branch: changing them touches
+    // no topology, so the LU's sparsity pattern and the generated code
+    // (`nls_dk_elim_gen.h`) remain valid.
     //
-    // It is the ONLY variant axis `docs/VARIANTES.md` closes (§1), by three
-    // independent sources: Keen's table (verified against the text),
-    // Wampler's big book — marking them on a PHOTO OF THE BOARD, `808-1` =
-    // 100 Ω and `808-2` = 10 kΩ, p. 255 — and the netlist itself, which
-    // carries the factory 808.
-    //
-    // The table's third circuit (the "10", an extra R at position `RA`)
-    // is NOT exposed: it needs a NEW ELEMENT — topology — and its value
-    // remains disputed between sources (Keen 1 kΩ, others 220 Ω ->
-    // `VERIFICACION_NETLIST.md` §13). Exposing it would be inventing the
-    // number.
-    //
-    // The defaults are the 808's, which is what sat here as literals => with
-    // the default variant the binary is BIT-IDENTICAL to before, and every
-    // published null still stands.
+    // Three independent sources agree on it: a published variant table, a
+    // pedal-modification book that marks them on a photo of the board (`808-1` =
+    // 100 Ω and `808-2` = 10 kΩ, p. 255), and the netlist itself, which carries
+    // the factory 808. The table's third circuit (an extra R at position `RA`)
+    // needs a new element and its value is disputed between sources (1 kΩ or
+    // 220 Ω), so it is not exposed. The defaults are the 808's.
     double rout_ser = 100.0, rout_shunt = 10e3;
 
     // The parasitics are added in `buildConstant()` and in
-    // `dk::Engine::prepare()`. (This used to say "see appendDevices()",
-    // which exists in no file.)
-    // `kMaxRes`/`kMaxCap` guard the stamping lambdas in build(): `res` has
-    // headroom (39 of 48 used) but `cap` is EXACTLY full, and the invitation in
-    // build() — "when adding a component, it goes at the END" — would write
-    // cap[12] straight over nres/ncap with no error. `talpha` sizes with cap.
-    // On overflow the stamp is SKIPPED and `desbordada` latches: no stdio
-    // here — build() is reachable from the audio thread through a knob re-tune,
-    // and the RT gate (rightly) rejects any fwrite in the .so. The harnesses
-    // assert the flag; a skipped component also wrecks every null instantly.
+    // `dk::Engine::prepare()`.
+    // `kMaxRes`/`kMaxCap` bound the stamping lambdas in build(): `res` has
+    // headroom (39 of 48 used) but `cap` is exactly full. On overflow the stamp
+    // is skipped and `overflowed` latches: no stdio here, because build() is
+    // reachable from the audio thread through a knob re-tune. `talpha` is sized
+    // with `cap`.
     static constexpr int kMaxRes = 48, kMaxCap = 12;
     bool overflowed = false;
     Res res[kMaxRes];   // netlist + the devices' parasitics
     Cap cap[kMaxCap];
     int nres = 0, ncap = 0;
 
-    // DIFFERENTIATED DISCRETISATION (Germain & Werner, WASPAA 2017 / AES 142).
+    // Differentiated discretisation (Germain & Werner, WASPAA 2017 / AES 142).
     //
-    // Each reactive element may carry its OWN bilinear-transform parameter:
+    // Each reactive element may carry its own bilinear-transform parameter:
     // `s -> (2/T'_l)*(1-z^-1)/(1+z^-1)` with `T'_l = talpha[l]*T`, instead of one
     // shared `T` for all twelve. In the DK formulation that is exactly
-    // `gc[l] = 2*C_l/(h*talpha[l])`, i.e. ZERO run-time cost: it only changes a
+    // `gc[l] = 2*C_l/(h*talpha[l])`, i.e. zero run-time cost: it only changes a
     // coefficient computed once in `prepare()`.
     //
-    // It is NOT a component value and it does NOT belong in `build()`: `build()`
-    // describes the CIRCUIT, this describes how it is DISCRETISED. Mixing them
+    // It is not a component value and does not belong in `build()`: `build()`
+    // describes the circuit, this describes how it is discretised. Mixing them
     // would let a numerical parameter later read as a capacitor tolerance.
     //
-    // With all of them at 1.0 the engine is BIT-IDENTICAL to the plain
-    // trapezoidal one -- by construction, not by luck: `h*1.0 == h`. That is the
-    // default, and the bit-identity gate in `make test` checks it.
+    // With all of them at 1.0 the engine is bit-identical to the plain
+    // trapezoidal one by construction: `h*1.0 == h`. That is the default.
     double talpha[kMaxCap] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
                               1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
 
@@ -445,17 +293,16 @@ struct Netlist {
     {
         nres = ncap = 0;
 
-        // ── EL SORTEO DE TOLERANCIAS ────────────────────────────────────────
+        // ── Tolerance draw ──────────────────────────────────────────────────
         //
-        // THE ORDER OF THE `R()`/`C()` CALLS IS EACH COMPONENT'S
-        // IDENTITY. One seed gives the same specimen only while that order
-        // holds: reordering two lines below CHANGES EVERY USER'S PEDAL
-        // without touching a value. When adding a component, it goes AT THE
-        // END.
+        // The order of the `R()`/`C()` calls is each component's identity: a seed
+        // gives the same unit only while that order holds, so reordering two lines
+        // below changes every seeded unit without touching a value. New components
+        // go at the end.
         //
-        // Own PRNG (SplitMix64) on purpose: `std::mt19937` does not
-        // guarantee the same sequence across library implementations, and
-        // this must give the SAME specimen on every machine.
+        // Own PRNG (SplitMix64): the standard library's random distributions do
+        // not guarantee the same sequence across implementations, and this must
+        // give the same unit on every machine.
         unsigned long long est = 0x9E3779B97F4A7C15ull * (seed + 1ull);
         auto draw = [&est](double tol) -> double {
             if (tol <= 0.0) return 1.0;
@@ -464,7 +311,7 @@ struct Netlist {
             z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
             z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
             z ^= z >> 31;
-            // uniforme en [-tol, +tol]
+            // uniform in [-tol, +tol]
             const double u = double(z >> 11) * (1.0 / 9007199254740992.0);
             return 1.0 + tol * (2.0 * u - 1.0);
         };
@@ -476,14 +323,14 @@ struct Netlist {
         const double tCe = ideal ? 0.0 : 0.20;   // electrolytics (>= 1 uF)
         const double tP  = ideal ? 0.0 : 0.20;   // potentiometers
 
-        // ONE POT = ONE DRAW, SHARED by both halves. A real pot has ONE
-        // total resistance with its tolerance, split by the wiper; drawing
-        // each half separately would build a component that does not exist
-        // and would BREAK THE KNOB'S LAW besides.
+        // One pot = one draw, shared by both halves. A real pot has one total
+        // resistance with its tolerance, split by the wiper; drawing each half
+        // separately would build a component that does not exist and would break
+        // the knob's law.
         const double kPgain = draw(tP), kPtone = draw(tP), kPlvl = draw(tP);
 
-        // The bounds checks fail LOUDLY at instantiate time (never in run()):
-        // silently overflowing `cap` corrupts the struct with no symptom.
+        // Bounds checks: an overflow latches `overflowed` instead of writing past
+        // the arrays.
         auto R = [&](int a, int b, double r) {
             if (nres >= kMaxRes) { overflowed = true; return; }
             res[nres++] = {a, b, r * draw(tR)};
@@ -492,7 +339,7 @@ struct Netlist {
             if (ncap >= kMaxCap) { overflowed = true; return; }
             cap[ncap++] = {a, b, c * draw(c >= 1e-6 ? tCe : tCf)};
         };
-        // Pots stamp with THEIR shared factor, not `R()`'s.
+        // Pots stamp with their shared factor, not `R()`'s.
         auto RP = [&](int a, int b, double r, double k) {
             if (nres >= kMaxRes) { overflowed = true; return; }
             res[nres++] = {a, b, r * k};
@@ -507,17 +354,10 @@ struct Netlist {
         R(N_n12, N_GND, 220.0); R(N_n10, N_n14, 1e3);   R(N_n13, N_n16, 1e3);
         RP(N_vr, N_n18, 100e3 * (1.0 - lvl) + eps, kPlvl);
         RP(N_n18, N_n16, 100e3 * lvl + eps, kPlvl);
-        // CORRECTED, and it was the SAME wrong topology the
-        // netlist had: the variant shunt hung off the EMITTER (`n17`) and the
-        // output load was pinned at 10k. It is the other way round — `R13` is
-        // 10k in both models and the variant axis is `R15`, the OUTPUT load
-        // after the coupling cap. Primary source and measurements:
-        // `docs/OD9_SHUNT_NODE_SIZING.md`.
-        // This copy lives in C++ and is NOT generated, so fixing
-        // `harness/spice/full.inc` did not touch it: the DK kept solving the
-        // old circuit and, being the cascade's ARBITER, the comparison blamed
-        // the cascade for an error that was its own. `make netlist-mna` now
-        // compares the two copies.
+        // `R13` is 10k and the variant axis is `R15`, the output load after the
+        // coupling cap. This copy lives in C++ and is not generated from the SPICE
+        // netlist; an automated check compares its resistors and capacitors
+        // with the netlist's, so change both together.
         R(N_n19, N_vr, 510e3);  R(N_n17, N_GND, 10e3);
         R(N_n17, N_n20, rout_ser);
         R(N_out, N_GND, rout_shunt);
@@ -525,23 +365,22 @@ struct Netlist {
         C(N_n5, N_n11, 0.047e-6); C(N_n5, N_n7, 51e-12); C(N_n9, N_GND, 0.22e-6);
         C(N_n8, N_n12, 0.22e-6); C(N_n14, N_n13, 1e-6); C(N_n18, N_n19, 0.1e-6);
         C(N_n20, N_out, 10e-6);
-        // the opamps' compensation: NOT an internal detail — it provides
-        // the dominant pole and, with the gm's current limit, the SLEW.
-        // Without it the clipper nulls 9 dB worse.
+        // The opamps' compensation: it provides the dominant pole and, with the
+        // gm's current limit, the slew.
         C(N_A2, N_GND, OModel{}.CP);  C(N_B2, N_GND, OModel{}.CP);
     }
 };
 
 
-// Fixed-pattern SPARSE LU.
+// Fixed-pattern sparse LU.
 //
-// The matrix has 119 nonzeros of 1089 (10,9 % density), so a dense LU does
+// The matrix has 119 nonzeros of 1089 (10.9 % density), so a dense LU does
 // 89 % of its work on zeros. The pattern — fill-in included — is computed
-// ONCE in `prepare()` by symbolic elimination, and every solve touches only
+// once in `prepare()` by symbolic elimination, and every solve touches only
 // the nonzeros.
 //
-// No pivoting, natural order — validated against the dense LU: were the
-// natural order unstable on this matrix, that null would sing.
+// No pivoting: validated against the dense LU (`lu_solve`), which it
+// matches on this matrix.
 struct SparseLU;
 class Engine;
 
@@ -554,38 +393,33 @@ struct SparseLU {
     int    perm[N];           // elimination order
     int    pat_i[512], pat_j[512], npat = 0;   // the nonzeros, for copying
 
-    // The elimination ORDER decides the fill-in, and here it decides a
-    // lot: measured, natural order takes 117 nonzeros to 360, MINIMUM DEGREE
-    // leaves them at 133 — practically fill-free. A 2,7x factor of work per
+    // The elimination order decides the fill-in, and here it decides a
+    // lot: natural order takes 117 nonzeros to 360, minimum degree
+    // leaves them at 133 — practically fill-free. A 2.7x factor of work per
     // solve, for free, computed once in `prepare()`.
     void minDegree(const int8_t P[N][N])
     {
-        // NOT `static`. It was `static bool G[N][N]`, i.e. ONE per-process
-        // copy shared by every instance — the same trap that cost a CRITICAL
-        // in `nls_dk.h` (see the scratch note in its `prepare()`). Today only
-        // the harness reaches this path, so no race in fact; fixed anyway
-        // because the defect class is the same, and the day the plugin uses
-        // it, it would be identically subtle.
-        // Stack it is: N is small and this runs once in `prepare()`.
+        // On the stack, not `static`: a static array would be shared by every
+        // instance. N is small and this runs once in `prepare()`.
         bool G[N][N];
         for (int i = 0; i < N; ++i)
             for (int j = 0; j < N; ++j) G[i][j] = P[i][j] || P[j][i];
-        bool fuera[N] = {false};
+        bool outside[N] = {false};
         for (int s = 0; s < N; ++s) {
-            int mejor = -1, gmin = 1 << 30;
+            int best = -1, gmin = 1 << 30;
             for (int i = 0; i < N; ++i) {
-                if (fuera[i]) continue;
+                if (outside[i]) continue;
                 int g = 0;
-                for (int j = 0; j < N; ++j) if (!fuera[j] && j != i && G[i][j]) ++g;
-                if (g < gmin) { gmin = g; mejor = i; }
+                for (int j = 0; j < N; ++j) if (!outside[j] && j != i && G[i][j]) ++g;
+                if (g < gmin) { gmin = g; best = i; }
             }
-            perm[s] = mejor;
-            fuera[mejor] = true;
+            perm[s] = best;
+            outside[best] = true;
             // eliminating a node connects its neighbours to each other
             for (int a = 0; a < N; ++a) {
-                if (fuera[a] || !G[mejor][a]) continue;
+                if (outside[a] || !G[best][a]) continue;
                 for (int b = 0; b < N; ++b)
-                    if (!fuera[b] && b != a && G[mejor][b]) G[a][b] = G[b][a] = true;
+                    if (!outside[b] && b != a && G[best][b]) G[a][b] = G[b][a] = true;
             }
         }
     }
@@ -608,7 +442,7 @@ struct SparseLU {
             for (int j = 0; j < N; ++j)
                 if (nz[i][j]) { pat_i[npat] = i; pat_j[npat] = j; ++npat; }
         }
-        // by COLUMNS: which rows to eliminate at step k. Scanning the N-k
+        // by columns: which rows to eliminate at step k. Scanning the N-k
         // rows for `nz[i][k]` costs N²/2 branches per solve, which at this
         // matrix size outweighs the arithmetic.
         for (int k = 0; k < N; ++k) {
@@ -624,7 +458,7 @@ struct SparseLU {
         return c;
     }
 
-    // In-place Doolittle, walking only the pattern, on the PERMUTED matrix.
+    // In-place Doolittle, walking only the pattern, on the permuted matrix.
     // Only the nonzeros are copied (133 of 1089), so permuting costs
     // nothing: a dense copy would have eaten the gain.
     bool solve(const double Asrc[N][N], const double bsrc[N], double out[N]) const
@@ -666,46 +500,38 @@ struct SparseLU {
 
 
 // ---------------------------------------------------------------------------
-// Motor
+// Engine
 // ---------------------------------------------------------------------------
 class Engine {
 public:
-    // One junction's constants, precomputed ONCE. `f1`, `f2` and `f3`
-    // depend only on FC and M: computing them per evaluation was three
-    // `pow` per call thrown away.
+    // One junction's constants. `f1`, `f2` and `f3` depend only on FC and M, so
+    // they are computed once.
     struct Junc {
         double cj0, vj, m, fc, fcvj, kq, f1, f2, f3, inv_vj, inv_f2;
 
-        // --- A7: u^(−m) by range reduction ---------------------------------
-        // Generic `pow` is the engine's most expensive transcendental
-        // (16,0 % of instructions, measured with callgrind at 4x). Here the
-        // exponent is a device-model CONSTANT, so much better than the
-        // general case is possible:
+        // --- u^(−m) by range reduction -------------------------------------
+        // Generic `pow` is the engine's most expensive transcendental. Here the
+        // exponent is a device-model constant, so:
         //
-        //     u = mant·2^e  (bitwise frexp, mant ∈ [0,5, 1))
+        //     u = mant·2^e  (bitwise frexp, mant ∈ [0.5, 1))
         //     u^(−m) = mant^(−m) · 2^(−m·e)
         //
-        // The second factor is a TABLE indexed by `e` (measured: `e` spans
-        // {0..4} over the whole knob and amplitude travel). The first is a
-        // polynomial over ONE OCTAVE, evaluated as a tree.
+        // The second factor is a table indexed by `e` (`e` spans {0..4} over the
+        // whole knob and amplitude travel). The first is a polynomial over one
+        // octave, evaluated as a tree of depth ~4: the cost of these routines is
+        // ruled by dependency-chain depth, not operation count, which is why a
+        // serial log2 -> exp2 does not pay.
         //
-        // Why this does not repeat the earlier own-`pow` failure
-        // (`exp2(−m·log2 u)`, +2,2 % over nine paired rounds): that one
-        // chained log2 -> exp2 IN SERIES, and these routines' cost is ruled
-        // by chain depth, not operation count. This one is a table plus a
-        // depth-~4 tree.
-        //
-        // The coefficients are NOT copied constants: they are fitted here
-        // from the model's `m` (Chebyshev interpolation, 9 nodes). An
-        // algorithm, not a table — which is what `CLEAN_ROOM.md` demands.
-        static constexpr int kDeg  = 8;          // degree 8 => −148,6 dB worst case
+        // The coefficients are fitted here from the model's `m` (Chebyshev
+        // interpolation, 9 nodes), not stored as constants.
+        static constexpr int kDeg  = 8;          // degree 8 => −148.6 dB worst case
         static constexpr int kEMin = -4, kEMax = 12;
         double pc[kDeg + 1] = {0};
         double pw2[kEMax - kEMin + 1] = {0};
 
         void tune_powneg()
         {
-            // Chebyshev nodes in [−1, 1] and their image in mant ∈ [0,5, 1).
+            // Chebyshev nodes in [−1, 1] and their image in mant ∈ [0.5, 1).
             const int n = kDeg + 1;
             double V[kDeg + 1][kDeg + 2];
             for (int i = 0; i < n; ++i) {
@@ -738,8 +564,8 @@ public:
                 pw2[e - kEMin] = std::pow(2.0, -m * double(e));
         }
 
-        // u^(−m). Outside the tabulated range it falls to libm: cannot happen
-        // over the measured travel, but a cheap fallback beats an `assert`.
+        // u^(−m). Outside the tabulated range it falls back to libm; that does not
+        // happen over the knob and amplitude travel.
         inline double powneg(double u) const
         {
             std::uint64_t b;
@@ -748,7 +574,7 @@ public:
             if (e < kEMin || e > kEMax || u <= 0.0) return std::pow(u, -m);
             b = (b & 0x000FFFFFFFFFFFFFull) | 0x3FE0000000000000ull;
             double mant;
-            std::memcpy(&mant, &b, sizeof mant);          // mant ∈ [0,5, 1)
+            std::memcpy(&mant, &b, sizeof mant);          // mant ∈ [0.5, 1)
             const double z = (mant - 0.75) * 4.0;
             const double z2 = z * z, z4 = z2 * z2;
             const double a = pc[0] + pc[1] * z, c1 = pc[2] + pc[3] * z;
@@ -786,17 +612,15 @@ public:
         g2h_ = 2.0 / h_;
         gm_ = o_.gm();
         inv_imax_ = 1.0 / o_.imax();
-        // The pattern clears BEFORE the constant part is built: cleared
-        // after, it erases exactly what that just marked, and since
-        // `assemble` starts from a copy of the constant matrix those entries
-        // never get re-marked. Result: a null pivot and the solver returning
-        // having done nothing.
+        // The pattern is cleared before the constant part is built: `assemble`
+        // starts from a copy of the constant matrix, so entries cleared afterwards
+        // would never be re-marked and the solve would hit a null pivot.
         std::memset(pat_, 0, sizeof pat_);
         buildConstant();
-        // The pattern is COLLECTED from real assemblies, marking every entry
-        // touched. Several run under different conditions — including the
-        // opamps clipping against the rails, which changes the structure —
-        // so the pattern is the UNION of everything possible.
+        // The pattern is collected from real assemblies, marking every entry
+        // touched. Several run under different conditions — including the opamps
+        // clipping against the rails, which changes the structure — so the pattern
+        // is the union of everything possible.
         for (int i = 0; i < N; ++i) x_[i] = 4.4;
         assemble(true);
         assemble(false);
@@ -820,9 +644,8 @@ public:
     double node(int n) const { return x_[n]; }
 
 public:
-    // The device physics is PUBLIC and STATIC on purpose: the DK engine
-    // (`nls_dk.h`) reuses it. Two copies of the same equations is exactly
-    // what ends up diverging with nobody noticing.
+    // The device physics is public and static on purpose: the DK engine
+    // (`nls_dk.h`) reuses it, so the equations exist once.
 private:
     // -- node-voltage access, resolving the fixed ones ----------------------
     double nv(int n) const
@@ -833,14 +656,11 @@ private:
         return vin_;                       // N_IN
     }
     void add(int n, double val)          { if (n >= 0) F_[n] += val; }
-    // `pat_` marks WHENEVER an entry is touched, whatever its value.
-    //
-    // The sparsity pattern CANNOT come from checking which entries are
-    // nonzero in one concrete matrix: some entries are EXACTLY zero at a
-    // working point through underflow — the base-collector junction sits at
-    // −5,7 V and `exp(−220)` is 0 in `double` — yet exist structurally.
-    // Deriving the pattern from the numbers gave a model that looked correct
-    // in an isolated test and drifted 3 V in real use.
+    // `pat_` marks every entry touched, whatever its value. The sparsity
+    // pattern cannot come from the nonzeros of one concrete matrix: some
+    // entries are exactly zero at a working point through underflow — the
+    // base-collector junction sits at −5.7 V and `exp(−220)` is 0 in
+    // `double` — yet exist structurally.
     void jac(int r, int c, double val)
     {
         if (r >= 0 && c >= 0) { J_[r][c] += val; pat_[r][c] = 1; }
@@ -854,12 +674,11 @@ private:
     }
 
     // -- devices ------------------------------------------------------------
-    // `exp(x) − 1` instead of `expm1(x)`: same argument, and computing both
-    // is paying twice. The cancellation of exp(x)−1 at small x gives a
-    // relative error ~eps/x on a current of IS·x ≈ 1e-22 A: irrelevant. And
-    // below −50 the exponential has already underflowed to zero, so the
-    // shortcut cuts and the whole call is saved (the base-collector junction
-    // lives at −220 in VT units).
+    // `exp(x) − 1` instead of `expm1(x)`: the exponential is needed anyway, and
+    // the cancellation of exp(x)−1 at small x gives a relative error ~eps/x on a
+    // current of IS·x ≈ 1e-22 A, which is irrelevant. Below −50 the exponential
+    // underflows to zero, so the call is skipped (the base-collector junction
+    // sits at −220 in VT units).
     static double fexp(double x) { return (x < -50.0) ? 0.0 : NLSC_EXP(x); }
 
 public:
@@ -882,14 +701,9 @@ public:
         QOut o;
         o.ib = q_.ISoBF * e_be + q_.ISE * (ex_bee - 1.0)
              + q_.ISoBR * e_bc;
-        // ONE RECIPROCAL INSTEAD OF THREE DIVISIONS. `qb` was used as a
-        // divisor THREE times — `ict/qb` and two `/(qb*qb)` — and a double
-        // division is ~14 badly pipelined cycles against a multiplication that
-        // pipelines. It is NOT bit-identical: `a/b` and `a*(1/b)` differ in the
-        // last bit, so it is signed off with a sample-by-sample audio diff and
-        // the expected floor is the reciprocal-against-division one.
-        // `NLSC_BJT_DIV=1` returns to the three divisions: that is the control
-        // arm.
+        // `NLSC_BJT_DIV=0` replaces the three divisions by `qb` with one
+        // reciprocal. It is not bit-identical: `a/b` and `a*(1/b)` differ in the
+        // last bit.
 #if NLSC_BJT_DIV
         o.ic = ict / qb - q_.ISoBR * e_bc;
 #else
@@ -912,8 +726,7 @@ public:
                  - q_.ISoBR * ex_bc * inv_VT;
 #endif
         if (with_charges) {
-            // The charges REUSE the exponentials above. A separate function
-            // recomputed them: 4 exp per transistor thrown away.
+            // The charges reuse the exponentials above.
             qjunc<LIN>(vbe, jbe_, o.qbe, o.cbe);
             qjunc<LIN>(vbc, jbc_, o.qbc, o.cbc);
             o.qbe += q_.TFIS * e_be;  o.cbe += q_.TFIS * ex_be * inv_VT;
@@ -926,57 +739,34 @@ public:
 
     // A junction's charge and capacitance.
     //
-    // ONE `pow`, not two: u^(1−m) = u · u^(−m), so the charge falls out of
-    // the capacitance without a second call. `pow` was the most expensive
-    // and most numerous transcendental (12 per assembly); this leaves 6.
+    // One `pow`, not two: u^(1−m) = u · u^(−m), so the charge follows from the
+    // capacitance without a second call.
     //
-    // `LIN` IS A TEMPLATE PARAMETER, NOT THE MACRO, AND THAT IS THE POINT.
-    // The macro decided this for EVERY caller in the translation unit, and
-    // several harnesses compile the cascade AND the DK together, so a macro
-    // physically cannot tell the two apart. The consequence was that the
-    // ARBITER carried the candidate's approximation, and a comparison between
-    // two engines is blind to what they share: it cancels in the subtraction.
-    // The cheap cascade came out BEATING its own exact engine by 3,01 dB over
-    // 36 cells, which a model deriving from another cannot legitimately do.
-    // The default reproduces the macro, so every existing caller — the whole
-    // cascade, i.e. the product — instantiates the same code. Only `nls_dk.h`
-    // asks for `false`, and it does so because it does not ship.
+    // `LIN` is a template parameter, not the macro, so that the cascade and the
+    // DK engine can be compiled in the same translation unit with different
+    // laws: the cascade uses the default (the macro's value), and `nls_dk.h`
+    // requests the exact law.
     template <bool LIN = (NLSC_JUNC_LIN != 0)>
     static void qjunc(double v, const Junc& j, double& q, double& c)
     {
-        // CONSTANT DEPLETION CAPACITANCE — THE DEFAULT.
+        // Constant depletion capacitance — the default. It removes the assembly's
+        // only `pow` (the diodes' two junctions and the two BJTs' four) for −7.46 %
+        // of clock, at −96.5 dB against the exact law (−78.0 dB at the worst knob
+        // point, high level, where Q2's junction sits after the attenuator).
         //
-        // Removes THE ONLY `pow` of the assembly, used by the diodes' two
-        // junctions and the two BJTs' four. Measured on the PRODUCT .so,
-        // paired, machine at rest:
-        //
-        //   cost    −7,46 % of clock, 21 of 21 pairs, p = 9,5e−07
-        //   fidelity vs the EXACT engine: −96,5 dB at 2x, 4x and 8x, and
-        //           −78,0 dB at the worst knob point (high lvl, where Q2's
-        //           junction sits AFTER the attenuator)
-        //   null vs ngspice: −70,7 -> −70,3 dB (0,4 dB)
-        //
-        // => On the house scale this is (≤ −60 dB) and ships without
-        // debate; the port stays at −70,3, far below its −60 yardstick.
-        //
-        // Why it comes almost free: over a clipper's travel `u^(−m)` moves
-        // only ±20 % around 1 (VJ = 1 V, M = 0,4, v ∈ −0,7…0,7).
-        // What CANNOT be said is that depletion does not matter: removing
-        // it WHOLE (zero capacitance) costs 15,2 dB in the cascade. What
-        // does not matter is its NONLINEARITY, which is another thing.
-        // `-DNLSC_JUNC_LIN=0` returns to the exact law, and with it A7's
-        // `powneg` regains a user (today it has none).
-// The SAME law, evaluated once, lives in `depletion_cap()` right below:
-// touch this one, touch that one.
+        // It is nearly free because over a clipper's travel `u^(−m)` moves only
+        // ±20 % around 1 (VJ = 1 V, M = 0.4, v ∈ −0.7…0.7). The depletion
+        // capacitance itself matters (removing it costs 15.2 dB); only its
+        // nonlinearity does not. `-DNLSC_JUNC_LIN=0` selects the exact law, which
+        // uses `powneg`.
+        // The same law, evaluated once, lives in `depletion_cap()` below: a change
+        // to one must be made to the other.
         if constexpr (LIN) {
             c = j.cj0;
             q = j.cj0 * v;
         } else {
             if (v < j.fcvj) {
                 const double u = 1.0 - v * j.inv_vj;
-#ifdef NLSC_PROBE_U
-                nlsc::probe_u(u, j.m);
-#endif
                 const double um = NLSC_JPOWNEG(j, u);     // the only pow
                 c = j.cj0 * um;
                 q = j.kq * (1.0 - u * um);
@@ -988,22 +778,16 @@ public:
         }
     }
 
-    // THE SAME DEPLETION LAW, EVALUATED ONCE.
+    // The same depletion law, evaluated once. It cannot be unified with
+    // `qjunc`: that one runs per sample, so its exact branch uses the
+    // `NLSC_JPOWNEG` range reduction and also returns the charge; this one runs
+    // once in a `prepare()`, uses `std::pow` and returns only the capacitance.
+    // A change to the law must be made to both.
     //
-    // It is the SECOND writing of the law above, placed right next to it
-    // ON PURPOSE: they cannot be unified and the why should be visible.
-    //   · `qjunc` runs PER SAMPLE, so its exact branch uses the
-    //     `NLSC_JPOWNEG` range reduction — fast and approximate — and also
-    //     returns the charge.
-    //   · this runs ONCE in a `prepare()`, so it uses the real `std::pow`
-    //     and returns only the capacitance.
-    // => Touch the law, touch BOTH. They sit ten lines apart.
-    //
-    // Why it exists: `SubQ2` needs the depletion capacitance AT THE REST
-    // POINT to use as its constant. Under `NLSC_JUNC_LIN` the hot path
-    // returns a bare `cj0`, valid for a clipper (v ∈ −0,7…0,7) and NOT for
-    // Q2's base-collector junction, which rests at −4,73 V where `cj0` is
-    // 1,85x the real capacitance.
+    // `SubQ2` needs the depletion capacitance at the rest point as its
+    // constant. Under `NLSC_JUNC_LIN` the hot path returns a bare `cj0`, valid
+    // for a clipper (v ∈ −0.7…0.7) but not for Q2's base-collector junction,
+    // which rests at −4.73 V where `cj0` is 1.85x the real capacitance.
     static double depletion_cap(double v, double cj0, double vj, double m, double fc)
     {
         if (v < fc * vj) return cj0 * std::pow(1.0 - v / vj, -m);
@@ -1012,25 +796,20 @@ public:
         return cj0 * (f3 + m * v / vj) / f2;
     }
 
-    // The diode's current AND charge in one pass, with ONE exponential.
+    // The diode's current and charge in one pass, with one exponential.
     //
-    // `carga` TAKES FOUR VALUES, because the junction charge's two terms
-    // neither cost nor are worth the same (measured):
+    // `charge` selects the junction charge's terms:
     //
-    //   0 = none                 −15,2 dB of null in the cascade
-    //   1 = depletion + diffusion   what there was
-    //   2 = diffusion only       −15,2 dB: depletion is ALL the error
-    //   3 = depletion only          −0,1 dB, and −10,6 % of clock
+    //   0 = none
+    //   1 = depletion + diffusion
+    //   2 = diffusion only
+    //   3 = depletion only
     //
-    // The split is the opposite of intuition: in a clipper the diodes are
-    // CUT OFF or barely conducting most of the time, and there the depletion
-    // capacitance (4 pF) sits in parallel with `C4` (51 pF) — 8 % of the
-    // feedback path in the highs. Diffusion only exists under strong
-    // conduction, a small fraction of the wave.
-    // And diffusion does not cost its two multiplies: it also costs two
-    // EXTRA `diode()` calls per sample in the state update.
-    // `bool` still works at every earlier call site (true->1, false->0), so
-    // this cannot move one bit of what already was.
+    // In a clipper the diodes are cut off or barely conducting most of the
+    // time, and there the depletion capacitance sits in parallel with `C4`
+    // (51 pF); diffusion only exists under strong conduction, a small fraction
+    // of the wave, and it costs two extra `diode()` calls per sample in the
+    // state update.
     struct DOut { double i, g, q, c; };
     template <bool LIN = (NLSC_JUNC_LIN != 0)>
     static DOut diode(const DModel& d_, const Junc& jd_, double vd, int charge)
@@ -1041,8 +820,8 @@ public:
         o.g = d_.IS * ex * d_.inv_nvt;
         o.q = o.c = 0.0;
         if (charge) {
-            if (charge != 2) qjunc<LIN>(vd, jd_, o.q, o.c);   // deplexion
-            if (charge != 3) {                           // difusion
+            if (charge != 2) qjunc<LIN>(vd, jd_, o.q, o.c);   // depletion
+            if (charge != 3) {                           // diffusion
                 o.q += d_.TT * o.i;
                 o.c += d_.TT * o.g;
             }
@@ -1050,22 +829,16 @@ public:
         return o;
     }
 
-    // THE ANTIPARALLEL PAIR, WITH A SINGLE EXPONENTIAL.
+    // The antiparallel pair, with a single exponential. The clipper evaluates
+    // the same diode at `w` and at `-w`, so the second exponential is the
+    // reciprocal of the first: one `exp` and one division per Newton iteration
+    // instead of two `exp`.
     //
-    // The clipper evaluates the SAME diode at `w` and at `-w`, so the second
-    // exponential is the reciprocal of the first. The no-charge path in stage 2
-    // already did this (`ei = 1.0 / e`); the charge path did not, and it is the
-    // one that ships. Two `exp` per Newton iteration become one `exp` and one
-    // division.
-    //
-    // THE SATURATION IS ONE-SIDED, and that is where the trap is. `fexp`
-    // clamps only the NEGATIVE side (`x < -50 -> 0`), so `1.0 / e` would be
-    // `1/0 = inf` exactly where the original returned a finite huge number.
-    // The three branches below reproduce `fexp(x)` and `fexp(-x)` term by term;
-    // only the middle one — the one that actually runs — takes the reciprocal.
-    //
-    // `1.0 / e` is NOT bit-identical to `exp(-x)`. Measured with the three
-    // yardsticks and with a sample-by-sample audio diff, not assumed.
+    // `fexp` clamps only the negative side (`x < -50 -> 0`), so `1.0 / e` would
+    // be `1/0 = inf` where `fexp(-x)` returns a finite huge number. The three
+    // branches below reproduce `fexp(x)` and `fexp(-x)` term by term; only the
+    // middle one takes the reciprocal. `1.0 / e` is not bit-identical to
+    // `exp(-x)`.
     template <bool LIN = (NLSC_JUNC_LIN != 0)>
     static void diode_par(const DModel& d_, const Junc& jd_, double w, int charge,
                           DOut& o1, DOut& o2)
@@ -1080,11 +853,11 @@ public:
         o2.i = d_.IS * (ei - 1.0);  o2.g = d_.IS * ei * d_.inv_nvt;
         o1.q = o1.c = o2.q = o2.c = 0.0;
         if (charge) {
-            if (charge != 2) {                       // deplexion
+            if (charge != 2) {                       // depletion
                 qjunc<LIN>( w, jd_, o1.q, o1.c);
                 qjunc<LIN>(-w, jd_, o2.q, o2.c);
             }
-            if (charge != 3) {                       // difusion
+            if (charge != 3) {                       // diffusion
                 o1.q += d_.TT * o1.i;  o1.c += d_.TT * o1.g;
                 o2.q += d_.TT * o2.i;  o2.c += d_.TT * o2.g;
             }
@@ -1114,7 +887,7 @@ private:
     void capInit();
     void capUpdate();
 
-    // estado
+    // state
     Netlist nl_{};
     QModel  q_{};
     DModel  d_{};
@@ -1125,7 +898,7 @@ private:
     double  F_[N] = {0};
     double  J_[N][N] = {{0}};
     double  Jc_[N][N] = {{0}};                 // linear part, constant
-    int8_t  pat_[N][N] = {{0}};                // STRUCTURAL pattern
+    int8_t  pat_[N][N] = {{0}};                // structural pattern
     double  gcap_[12] = {0};
     double  g2h_ = 0.0;          // 2/h, appearing in every companion model
     double  gm_ = 0.0, inv_imax_ = 0.0;
@@ -1156,28 +929,22 @@ inline constexpr OInst kO[2] = {
     {N_n9, N_n10, N_n14, N_B2},
 };
 
-// The Jacobian's LINEAR part never changes: not between iterations nor
+// The Jacobian's linear part never changes: not between iterations nor
 // between samples (while no knob or step moves). Built once, each iteration
 // starts from a copy. Saves walking 25 resistors with their divisions and
 // branches — nearly half the assembly cost.
 inline void Engine::buildConstant()
 {
-    // The devices' parasitic resistors (RB, RC, RS, RIN, RCM, Rp, Ro) go
-    // on the SAME list as the netlist's. Keeping them apart was a mistake:
-    // moving their Jacobian to the constant block left them out of the
-    // residual, and the rest drifted 6354 µV with Newton pinned at the
-    // iteration cap. A resistor contributes to BOTH or to neither.
+    // The devices' parasitic resistors (RB, RC, RS, RIN, RCM, Rp, Ro) go on
+    // the same list as the netlist's, so each contributes to both the Jacobian
+    // and the residual.
     for (int i = 0; i < 2; ++i) {
         auto R = [&](int a, int b, double r) {
             if (nl_.nres >= Netlist::kMaxRes) { nl_.overflowed = true; return; }
             nl_.res[nl_.nres++] = {a, b, r};
         };
-        // CONTROL (not the product): `NLSC_MNA_RB=0` removes the base
-        // resistance of BOTH transistors of the EXACT engine. It exists to
-        // answer a question no other yardstick answers -- whether `RB` moves
-        // the model closer to ngspice or further from it -- by putting the
-        // SAME term in the ARBITER instead of in the candidate. At 1 (the
-        // default) the binary is the usual one.
+        // `NLSC_MNA_RB=0` removes the base resistance of both transistors; the
+        // default (1) includes it.
         R(kQ[i].b, kQ[i].bi, (NLSC_MNA_RB) ? q_.RB : 1e-9);
         R(kQ[i].c, kQ[i].ci, q_.RC);
         R(kD[i].a, kD[i].ai, d_.RS);
@@ -1268,7 +1035,7 @@ inline void Engine::assemble(bool transient)
 
     for (int i = 0; i < 2; ++i) {
         const OInst& oa = kO[i];
-        // current-LIMITED transconductance = the slew mechanism.
+        // current-limited transconductance = the slew mechanism.
         // `Bgm 0 2` injects current INTO internal node 2.
         const double vd = nv(oa.p) - nv(oa.n);
         // sech²(x) = 1 − tanh²(x): the derivative falls out of the tanh
@@ -1279,9 +1046,8 @@ inline void Engine::assemble(bool transient)
         const double ign = o_.imax() * t;
         const double dign = gm_ * (1.0 - t * t);
         add(oa.i2, -ign);  jac(oa.i2, oa.p, -dign); jac(oa.i2, oa.n, dign);
-        // Output: V = clip(V(2)), then Ro to the output node. Clipping goes
-        // as a hard switch; if it ever troubles convergence, lift it to
-        // REGION DETECTION (a sibling project's opamp lesson).
+        // Output: V = clip(V(2)), then Ro to the output node. The clip is a hard
+        // switch.
         const double v2 = nv(oa.i2);
         const double lo = o_.VSAT, hi = VCC - o_.VSAT;
         double vt_, dvo;
@@ -1294,7 +1060,7 @@ inline void Engine::assemble(bool transient)
     }
 }
 
-// Dense LU with partial pivoting. Kept as the REFERENCE to validate the
+// Dense LU with partial pivoting. Kept as the reference to validate the
 // sparse one against, not for production.
 inline bool lu_solve(double A[N][N], double b[N], double out[N])
 {
@@ -1361,7 +1127,7 @@ inline void Engine::capUpdate()
     }
 }
 
-// Limits the junctions and REBUILDS the nodes from them. Limiting the nodes
+// Limits the junctions and rebuilds the nodes from them. Limiting the nodes
 // separately does not bound the junctions, which are their differences.
 inline void limit_junctions(double* xn, const double* xo,
                             double vt, double vcritQ, double nvtD, double vcritD)
@@ -1391,11 +1157,10 @@ inline int Engine::step(double vin)
         if (!slu_.solve(J_, rhs, dx)) break;
         double mx = 0.0;
         for (int i = 0; i < N; ++i) mx = std::fmax(mx, std::fabs(dx[i]));
-        // Criterion on the STEP, not the current residual. With
-        // discretised capacitors the companion conductance is 2C/h — for
-        // C9 = 10 µF at 384 kHz that is 7,68 S, i.e. currents in AMPERES —
-        // and an absolute current threshold would be 1e-16 relative: Newton
-        // would NEVER converge. Measured: it cost a factor 9 of speed.
+        // Criterion on the step, not the current residual. With discretised
+        // capacitors the companion conductance is 2C/h — for C9 = 10 µF at
+        // 384 kHz that is 7.68 S, i.e. currents in amperes — and an absolute
+        // current threshold would be 1e-16 relative: Newton would never converge.
         for (int i = 0; i < N; ++i) x_[i] += dx[i];
         if (mx < 1e-9) { ++k; break; }
         double xn[N];

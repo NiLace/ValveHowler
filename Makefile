@@ -11,9 +11,9 @@
 
 CXX      ?= g++
 
-# INSTRUCTION-SET BASELINE -- generic x86-64, deliberately.
+# Instruction-set baseline -- generic x86-64, deliberately.
 #
-# Do NOT add -mavx2/-mfma/-march=native here. Post-Haswell code belongs only
+# Do not add -mavx2/-mfma/-march=native here. Post-Haswell code belongs only
 # inside the `isa_v3` clone below, which the resolver selects at run time on
 # the CPUs that have it. Emitted globally, those instructions do not make the
 # plugin slower on an older CPU: they make it fail to start, and it takes the
@@ -22,7 +22,7 @@ ARCH     ?=
 
 # The second clone. The same translation unit is compiled twice -- once at the
 # baseline and once here -- and `instantiate()` picks one per instance. What
-# keeps the linker from folding the two copies together is the NAMESPACE, not
+# keeps the linker from folding the two copies together is the namespace, not
 # the visibility.
 ARCH_V3  ?= -mavx2 -mfma
 
@@ -46,7 +46,7 @@ CXXFLAGS := -O3 $(ARCH) $(VIS) $(OSCFG) -fPIC -Wall -Wextra -Wshadow -std=c++17
 LDFLAGS  := -shared
 LDLIBS   := -lm
 
-# Floating-point relaxations the PRODUCT is built with. They are applied to the
+# Floating-point relaxations the plugin is built with. They are applied to the
 # plugin's own translation units only.
 PRODFP   := -fassociative-math -fno-signed-zeros -fno-trapping-math
 
@@ -67,12 +67,14 @@ GUI_PKGS := cairo cairo-xlib x11 freetype2
 GUI_CF   := $(shell pkg-config --cflags $(GUI_PKGS))
 GUI_LIBS := $(shell pkg-config --libs $(GUI_PKGS))
 
-# The fonts travel inside the bundle: the interface loads them through
-# FreeType directly, bypassing fontconfig, so the panel looks the same on any
-# machine. They are OFL and stay OFL; their licences travel with them.
-FONTS := Archivo-800.ttf Archivo-700-Italic.ttf BarlowCondensed-600.ttf \
-         SpaceMono-400.ttf OFL-Archivo.txt OFL-BarlowCondensed.txt \
-         OFL-SpaceMono.txt
+# The font travels inside the bundle: the interface loads it through FreeType
+# directly, bypassing fontconfig, so the panel looks the same on any machine.
+# It is OFL and stays OFL; its licence travels with it.
+FONTS := Doto-Round-Bold.ttf OFL-Doto.txt
+
+# The panel's images, rendered from a 3D scene: one set per box colour.
+PHOTO := $(foreach g,od9 od8,plate_$(g)_active.png plate_$(g)_bypass.png \
+           knob_$(g)_drive.png knob_$(g)_level.png knob_$(g)_tone.png) treadle.png
 
 # Rebuild when the flags change, not only when a source does.
 FLAGSTAMP := $(BUILD)/.flags
@@ -94,7 +96,7 @@ $(BUILD)/isa_base.o: $(SRC)/nls_isa_tu.cpp $(FLAGSTAMP) | $(BUILD)
 $(BUILD)/isa_v3.o: $(SRC)/nls_isa_tu.cpp $(FLAGSTAMP) | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PRODFP) $(ARCH_V3) $(CASCFG) -DNLSC_ISA_NS=isa_v3 -DNLSC_ISA_FACTORY=make_v3 -c -o $@ $<
 
-# The explicit -MF matters: without it -MMD writes the .d INSIDE the bundle,
+# The explicit -MF matters: without it -MMD writes the .d inside the bundle,
 # where $@ lives, and it would be installed next to the .so.
 $(BUNDLE)/valvehowler.so: $(SRC)/nls_valvehowler.cpp \
                           $(BUILD)/isa_base.o $(BUILD)/isa_v3.o \
@@ -111,12 +113,12 @@ gui: $(BUNDLE)/valvehowler_ui.so
 bundle: $(BUNDLE)/valvehowler.so $(BUNDLE)/valvehowler_ui.so
 	@cp $(LV2DIR)/manifest.ttl $(LV2DIR)/valvehowler.ttl $(LV2DIR)/valvehowler_ui.ttl $(BUNDLE)/
 	@cp $(FONTS:%=assets/fonts/%) $(BUNDLE)/
-	@cp gui/Logo.png $(BUNDLE)/
+	@mkdir -p $(BUNDLE)/photo
+	@cp $(PHOTO:%=gui/photo/%) $(BUNDLE)/photo/
 	@echo "bundle ready: $(BUNDLE)"
 
-# ATOMIC install. A plain `cp` rewrites the .so IN PLACE and corrupts a host
-# that has it memory-mapped -- it has taken Ardour down. Temp directory, then
-# rename, always.
+# Atomic install. A plain `cp` rewrites the .so in place and can crash a host
+# that has it memory-mapped. Temp directory, then rename, always.
 install: bundle
 	@mkdir -p $(INSTALL_DIR)
 	@rm -rf $(INSTALL_DIR)/valvehowler.lv2.tmp
@@ -128,7 +130,7 @@ install: bundle
 	@rm -rf $(INSTALL_DIR)/valvehowler.lv2.old
 	@echo "installed in $(INSTALL_DIR)/valvehowler.lv2"
 
-# A smoke check on the BUILT BUNDLE, which is the artefact that gets installed.
+# A smoke check on the built bundle, which is the artefact that gets installed.
 # It answers the two questions a build can get wrong without any error: whether
 # the entry point survived `-fvisibility=hidden`, and whether every file the
 # interface loads at run time is actually in the bundle.
@@ -138,7 +140,7 @@ test: bundle
 	  || { echo "FAIL: valvehowler.so does not export lv2_descriptor"; fail=1; }; \
 	nm -D --defined-only $(BUNDLE)/valvehowler_ui.so | grep -q ' lv2ui_descriptor$$' \
 	  || { echo "FAIL: valvehowler_ui.so does not export lv2ui_descriptor"; fail=1; }; \
-	for f in manifest.ttl valvehowler.ttl valvehowler_ui.ttl Logo.png $(FONTS); do \
+	for f in manifest.ttl valvehowler.ttl valvehowler_ui.ttl $(FONTS) $(PHOTO:%=photo/%); do \
 	  [ -f $(BUNDLE)/$$f ] || { echo "FAIL: missing from the bundle: $$f"; fail=1; }; \
 	done; \
 	[ $$fail -eq 0 ] && echo "bundle OK: entry points exported, all runtime files present"; \

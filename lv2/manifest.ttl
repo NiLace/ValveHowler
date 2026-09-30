@@ -7,10 +7,9 @@
     lv2:binary <valvehowler.so> ;
     rdfs:seeAlso <valvehowler.ttl> .
 
-# The GUI is a SEPARATE MODULE the host loads beside the DSP, and this
+# The GUI is a separate module the host loads beside the DSP, and this
 # manifest entry is what lets it be found. Without it the plugin loads
-# with the host's generic interface and the GUI raises no error: it
-# simply does not appear.
+# with the host's generic interface and no error is raised.
 <https://nylarea.com/plugins/valvehowler#ui>
     a ui:X11UI ;
     ui:binary <valvehowler_ui.so> ;

@@ -1,50 +1,40 @@
-// ui_x11.cpp — Valve Howler's X11 LV2 UI (the «NLS Cream» pedal).
+// ui_x11.cpp — Valve Howler's X11 LV2 UI.
 //
-// This is the window-and-events layer. All painting lives in `ui_draw.h`;
-// here lives:
+// This is the window-and-events layer. All painting lives in `ui_photo.h`
+// (the photoreal panel: Blender renders composited with Cairo); here lives:
 //   - creating a child window inside the one the host provides,
-//   - wrapping it in a `cairo_xlib_surface` and loading the bundle fonts,
+//   - wrapping it in a `cairo_xlib_surface`, loading the panel images and the
+//     bundle fonts,
 //   - pumping X events in the `idle` callback (expose / mouse),
 //   - turning a knob drag into port writes,
 //   - toggling the footswitch (`lv2:enabled`) and opening the variant
 //     dropdown,
 //   - reflecting on the panel what the host changes on its own
-//     (`port_event`).
+//     (`port_event`),
+//   - the two short animations: the plates crossfade on bypass and the
+//     treadle travels.
 //
 // No Pugl and no SVG renderer: just Xlib + cairo-xlib + FreeType, already
-// on the system. The same rig as `TheOmegaCake/src/ui_x11.cpp`, which in
-// turn grew out of the 0C family's Pugl scaffolding.
-// X11 on purpose (under Wayland it runs via XWayland).
+// on the system. X11 on purpose (under Wayland it runs via XWayland).
 //
-// ─────────────────────────────────────────────────────────────────────────────
-// THE THREE THINGS THIS FILE MUST GET RIGHT, AND WHY
-// ─────────────────────────────────────────────────────────────────────────────
+// Design constraints:
 //
-// 1. DO NOT REPAINT THE WHOLE PANEL ON EVERY EVENT. That froze Ardour
-//    with the 0C-family GUIs: ~100 % of a core per open window. Here the
-//    static layer draws ONCE to a surface and gets stamped, with a 30 fps
-//    cap. Measured on this machine with `make gui-bench`:
-//        full frame without cache ....... 8,744 ms  (26,2 % of a core at 30 fps)
-//        live layer with cache .......... 0,069 ms  ( 0,21 %)            => ×126
+// 1. No repaint per event. Painting happens once per idle turn, and only
+//    when something changed or an animation is running; the images are
+//    scaled once per scale factor (`ui_photo.h`), never per paint.
 //
-// 2. THE MARGIN IS SUBTRACTED FROM MOUSE COORDINATES. The pedal floats
-//    with `UI_MARGIN` of backdrop around it, so the panel origin is NOT
-//    the window's. Forget it and the knobs draw in one place and grab in
-//    another — with no error raised.
+// 2. Hit zones come from the same projection as the images. Mouse positions
+//    are converted to ASSET pixels (the renders' grid) and tested against
+//    `ui_photo_layout.h`, which the Blender scene generates: nothing here is
+//    measured off a picture.
 //
-// 3. `ui:touch`, THE GAP `DISENO_DE_INTERFACES.md` §6 marks as "the one
-//    that hurts, and it is PRODUCT". No workshop GUI implemented it
-//    (0 uses in the two audited repos). Without it the host cannot know a
-//    gesture began => touch-mode automation and MIDI-learn misbehave. Here
-//    the host is told on grab and on release.
-//    With the caveat the document itself leaves: the absence is a
-//    measured FACT, but that it breaks something concrete in Ardour is an
-//    INFERENCE nobody reproduced. Implemented because the spec says so
-//    and it costs ten lines, not because the symptom was seen.
+// 3. `ui:touch`: the host is told when a gesture on a knob begins and ends,
+//    which touch-mode automation and MIDI-learn rely on (the LV2 UI spec).
 
-#include "ui_draw.h"
+#include "ui_photo.h"
+#include "ui_fonts.h"
 #include "nls_variantes.h"
-// The port indices, from the ONE place that defines them (see the note at
+// The port indices, from the one place that defines them (see the note at
 // the `using` declarations below).
 #include "nls_iface.h"
 
@@ -57,63 +47,51 @@
 #include <cairo/cairo.h>
 #include <cairo/cairo-xlib.h>
 #include <X11/Xlib.h>
+#include <X11/keysym.h>
+#include <X11/Xutil.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <ctime>
 #include <string>
 
 #define NLSC_UI_URI "https://nylarea.com/plugins/valvehowler#ui"
 
 namespace {
 
-// THE PORT INDICES COME FROM `nls_iface.h`, NOT FROM A COPY HERE.
-//
-// This block used to be its own `enum` with the numbers written out, under a
-// comment saying they "must match". A comment cannot make them match: the two
-// lists are only equal until someone edits one, and the failure is SILENT —
-// the UI keeps writing to an index that now means another port
-// -- a rule written twice diverges.
-//
-// It was about to bite. Removing `oversampling` (index 5), `engine` and
-// `seed` renumbers everything behind them: `latency` 6->5,
-// `enabled` 7->6, `variant` 8->7. With the old copy still saying
-// `PORT_ENABLED = 7`, the footswitch would have written to `variant` — pressing
-// bypass would change circuit, with no error anywhere.
-//
-// The `#include` itself lives with the other includes at the top: pulled in
-// HERE it would land inside this anonymous namespace and drag `nlsc::` in with
-// it, which is how `nlsc::ui` started shadowing the UI's own namespace.
+// The port indices come from `nls_iface.h`, not from a local copy that could
+// diverge at a renumbering. The `#include` sits with the
+// others at the top: inside this anonymous namespace it would drag `nlsc::` in
+// and shadow the UI's own namespace.
 using nlsc::PORT_DRIVE;
 using nlsc::PORT_TONE;
 using nlsc::PORT_LEVEL;
 using nlsc::PORT_ENABLED;
 using nlsc::PORT_VARIANT;
 
-inline double clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+// NaN-safe: fmax/fmin return the non-NaN operand, so a NaN lands on 0.
+inline double clamp01(double v) { return std::fmin(1.0, std::fmax(0.0, v)); }
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// A draggable knob: hit centre and radius (panel units) plus its port.
-// The geometry is NOT copied here: it comes from `ui_draw.h`, which is
-// what draws. House rule — "hit-boxes ALWAYS from the drawing module, so
-// drawing and hit-testing CANNOT drift apart".
-struct Knob { double cx, cy, r; uint32_t puerto; };
+namespace photo = nlsc::ui::photo;
 
-// Drag travel: 200 window px for 0->1. It is what the handoff itself does
-// (`(drag.y − e.clientY) / 200`), not a number chosen here.
+// The port of each knob, in the order `photo::KNOBS` keeps them (drive, level,
+// tone). The geometry is not here: it is the scene's projection.
+constexpr uint32_t KNOB_PORT[3] = { PORT_DRIVE, PORT_LEVEL, PORT_TONE };
+
+double seconds_now()
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
+// Drag travel: 200 logical px for 0->1, the same law as the panel design.
 constexpr double DRAG_PX = 200.0;
 constexpr double WHEEL_STEP  = 0.02;
 
-// There is no frame-rate cap: see `ui_idle`. The event loop already batches,
-// and a second clock could only take frames away.
+// There is no frame-rate cap: see `ui_idle`.
 
-double ahora_s()
-{
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return double(t.tv_sec) + double(t.tv_nsec) * 1e-9;
-}
 
 // --- the variant dropdown ----------------------------------------------------
 struct Popup {
@@ -123,8 +101,10 @@ struct Popup {
     cairo_surface_t* buf   = nullptr;   // off-screen double buffer
     cairo_t*         bufcr = nullptr;
     int  w = 0, h = 0, row_h = 0;
-    int  sobre = -1;                    // row under the mouse, or −1
-    bool abierto = false;
+    int  hover = -1;                    // row under the mouse, or −1
+    bool is_open = false;
+    Window focus_at_open = 0;           // who had the keyboard focus when it opened
+    int  frame = 0;                     // width of the bevelled frame around the rows
 };
 
 struct UI {
@@ -133,185 +113,240 @@ struct UI {
     Window   parent = 0;
     Window   root   = 0;
     Visual*  visual = nullptr;
+    int      depth  = 0;                // the parent's; the popup uses it too
+    Colormap cmap   = 0;                // ours, when the parent's visual is not the default
     cairo_surface_t* surf = nullptr;
     cairo_t*         cr   = nullptr;
 
-    // Whole-window double buffer + cached static layer.
+    // Whole-window double buffer: the panel is composed here, then blitted once.
     cairo_surface_t* buf   = nullptr;
     cairo_t*         bufcr = nullptr;
-    cairo_surface_t* estatica = nullptr;
 
     int    w = 0, h = 0;
-    double scale = 1.0;
+    double scale = 1.0;          // the host's `ui:scaleFactor`: the window's size at open
+    double fit = 0.5;            // window pixels per asset pixel: the pedal fitted to the window
+    int    ox = 0, oy = 0;       // where the fitted pedal starts in the window (centred)
 
     LV2UI_Write_Function write = nullptr;
     LV2UI_Controller     ctl   = nullptr;
     const LV2UI_Touch*   touch = nullptr;
 
-    nlsc::ui::Fonts      fuentes;
-    // THE LOGO. It must be loaded HERE and not only in the preview tool: the
-    // drawing tolerates a null logo, so a UI that forgets it renders a panel
-    // with no logo and raises nothing. What ships is this file, not its twin.
-    cairo_surface_t*     logo = nullptr;
-    nlsc::ui::PanelState st;
-    nlsc::ui::Theme      tema = nlsc::ui::default_theme();
-    nlsc::ui::Cache      cache;
+    nlsc::ui::Fonts      fonts_;
+    photo::Assets        assets;     // as loaded from the bundle, for the current variant's green
+    std::string          photo_dir;  // the bundle's photo/
+    photo::Scaled        scaled;     // the images at this window's scale
+
+    // What the panel shows. Knob values are the ports' (0..1).
+    double knob[3] = { 0.5, 0.5, 0.5 };   // drive, level, tone
+    bool   knob_dirty[3] = {};            // moved, not yet written to the port
+    bool   on = true;                     // `enabled`
+    bool   pressed = false;               // the treadle held down
     int    variant = 0;
+    bool   display_hover = false;         // the pointer is over the variant display
 
-    Knob knobs[3];
-    int   n_knobs = 0;
+    // The two animations, driven by the clock (not by how often the host idles).
+    double lit = 1.0, lit_from = 1.0, lit_t0 = -1.0;          // plate crossfade
+    double tread = 0.0, tread_from = 0.0, tread_t0 = -1.0;    // treadle travel
 
-    // THE CACHE KEY: EXACTLY what the static layer draws, not one
-    // field more or fewer. More => the expensive backdrop rebuilds for a
-    // pixel the cache never held. Fewer => the panel freezes at the old
-    // value and the control looks unresponsive — the SILENT failure.
-    // Audited by reading `draw_static`: it paints the LED (`on`), the
-    // footswitch (`pressed`), the variant name and the dropdown text. It
-    // does NOT paint the knob values — `draw_live` does.
-    struct Key { int w = -1, h = -1; bool on = false, pressed = false; int variant = -1; };
-    Key clave;
-
-    int    arrastre = -1;          // index into `knobs`, or −1
-    double arr_y0 = 0.0, arr_v0 = 0.0;
+    int    drag = -1;          // index into `knob`, or −1
+    double drag_y0 = 0.0, drag_v0 = 0.0;
 
     Popup  popup;
-    bool   necesita_pintar = true;
-    double ultimo_pintado = 0.0;
+    bool   needs_paint = true;
 };
 
-double knob_value(const UI* ui, int i)
-{
-    switch (ui->knobs[i].puerto) {
-        case PORT_DRIVE: return ui->st.drive;
-        case PORT_TONE:  return ui->st.tone;
-        case PORT_LEVEL: return ui->st.level;
-    }
-    return 0.0;
-}
+double knob_value(const UI* ui, int i) { return ui->knob[i]; }
 
+// A drag moves the knob on every motion event, but the port is written once per
+// idle turn with the latest value: the host gets the same final value
+// without a write per pixel of mouse travel.
 void set_knob(UI* ui, int i, double v01)
 {
-    v01 = clamp01(v01);
-    switch (ui->knobs[i].puerto) {
-        case PORT_DRIVE: ui->st.drive = v01; break;
-        case PORT_TONE:  ui->st.tone  = v01; break;
-        case PORT_LEVEL: ui->st.level = v01; break;
+    ui->knob[i] = clamp01(v01);
+    ui->knob_dirty[i] = true;
+    ui->needs_paint = true;
+}
+
+// Writes what moved. Called once per idle turn, and before a gesture's closing
+// `touch`, so the host always sees the last value inside the gesture.
+void flush_knobs(UI* ui)
+{
+    for (int i = 0; i < 3; ++i) {
+        if (!ui->knob_dirty[i]) continue;
+        ui->knob_dirty[i] = false;
+        if (ui->write) {
+            float pv = float(ui->knob[i]);
+            ui->write(ui->ctl, KNOB_PORT[i], sizeof(float), 0, &pv);
+        }
     }
-    if (ui->write) {
-        float pv = float(v01);
-        ui->write(ui->ctl, ui->knobs[i].puerto, sizeof(float), 0, &pv);
-    }
-    ui->necesita_pintar = true;
 }
 
 // `ui:touch` — tell the host a gesture begins and ends. It is what makes
 // touch-mode automation and MIDI-learn behave.
-void notify_touch(UI* ui, uint32_t puerto, bool agarrado)
+void notify_touch(UI* ui, uint32_t port_idx, bool held)
 {
     if (ui->touch && ui->touch->touch)
-        ui->touch->touch(ui->touch->handle, puerto, agarrado);
+        ui->touch->touch(ui->touch->handle, port_idx, held);
 }
 
-// Window coordinates -> PANEL coordinates. This is where the margin is
-// subtracted; without it the whole hit map is displaced.
-void a_panel(const UI* ui, double px, double py, double* x, double* y)
+// Window pixels per ASSET pixel: the images are rendered at twice the logical size.
+// The pedal keeps its proportions and fills the window as far as it can: the host may
+// resize it. Recomputed on every size change.
+double asset_scale(const UI* ui) { return ui->fit; }
+
+// The same factor as a UI scale (1 = the logical 450 x 675), for sizes given in logical px.
+double ui_scale(const UI* ui) { return ui->fit * 2.0; }
+
+void update_fit(UI* ui)
 {
-    *x = px / ui->scale - nlsc::ui::UI_MARGIN;
-    *y = py / ui->scale - nlsc::ui::UI_MARGIN;
+    const double f = std::fmin(ui->w / photo::ASSET_W, ui->h / photo::ASSET_H);
+    ui->fit = f > 0.0 ? f : ui->scale * 0.5;
+    ui->ox = int((ui->w - std::ceil(photo::ASSET_W * ui->fit)) / 2.0);
+    ui->oy = int((ui->h - std::ceil(photo::ASSET_H * ui->fit)) / 2.0);
+    if (ui->ox < 0) ui->ox = 0;
+    if (ui->oy < 0) ui->oy = 0;
+}
+
+// Window coordinates -> ASSET coordinates, the grid the hit zones are given in.
+void to_asset(const UI* ui, double px, double py, double* x, double* y)
+{
+    *x = (px - ui->ox) / asset_scale(ui);
+    *y = (py - ui->oy) / asset_scale(ui);
 }
 
 int knob_impact(const UI* ui, double px, double py)
 {
-    double x, y; a_panel(ui, px, py, &x, &y);
-    for (int i = 0; i < ui->n_knobs; ++i) {
-        const double dx = x - ui->knobs[i].cx, dy = y - ui->knobs[i].cy;
-        if (dx * dx + dy * dy <= ui->knobs[i].r * ui->knobs[i].r) return i;
-    }
-    return -1;
+    double x, y; to_asset(ui, px, py, &x, &y);
+    return photo::knob_at(x, y);
 }
 
-// RECTANGLE, not circle. The footswitch is drawn as a plate, so a circular
-// hit-test leaves its four corners visible but dead to the click. The drawing
-// and the mouse map must come from the SAME constants -- the knobs never had
-// this problem because they do; here there were two sources.
-// The WELL is used rather than the plate: a foot does not aim finely, and the
-// slack around the plate is part of the target the user perceives.
+// The treadle's own box: a foot does not aim finely, and the box already includes
+// a little of the frame around the plate.
 bool hit_footswitch(const UI* ui, double px, double py)
 {
-    double x, y; a_panel(ui, px, py, &x, &y);
-    return x >= nlsc::ui::FS_WELL_X && x <= nlsc::ui::FS_WELL_X + nlsc::ui::FS_WELL_W &&
-           y >= nlsc::ui::FS_WELL_Y && y <= nlsc::ui::FS_WELL_Y + nlsc::ui::FS_WELL_H;
+    double x, y; to_asset(ui, px, py, &x, &y);
+    return photo::in_box(photo::TREADLE_HIT, x, y);
 }
 
 bool hit_dropdown(const UI* ui, double px, double py)
 {
-    double x, y; a_panel(ui, px, py, &x, &y);
-    return x >= nlsc::ui::DD_X && x <= nlsc::ui::DD_X + nlsc::ui::DD_W &&
-           y >= nlsc::ui::DD_Y && y <= nlsc::ui::DD_Y + nlsc::ui::DD_H;
+    double x, y; to_asset(ui, px, py, &x, &y);
+    return photo::in_box(photo::DISPLAY_BEZEL, x, y);
+}
+
+// Start an animation from wherever it is now, so a reversal mid-way does not jump.
+void start_fade(UI* ui)
+{
+    ui->lit_from = ui->lit;
+    ui->lit_t0 = seconds_now();
+    ui->needs_paint = true;
+}
+
+void start_treadle(UI* ui)
+{
+    ui->tread_from = ui->tread;
+    ui->tread_t0 = seconds_now();
+    ui->needs_paint = true;
+}
+
+// Advance both animations to `now`; true while either still moves.
+bool animate(UI* ui, double now)
+{
+    bool moving = false;
+    const double lit_to = ui->on ? 1.0 : 0.0;
+    if (ui->lit_t0 >= 0.0) {
+        const double t = (now - ui->lit_t0) / photo::FADE_S;
+        if (t >= 1.0) { ui->lit = lit_to; ui->lit_t0 = -1.0; }
+        else { ui->lit = ui->lit_from + (lit_to - ui->lit_from) * std::fmax(0.0, t); moving = true; }
+    }
+    const double tread_to = ui->pressed ? 1.0 : 0.0;
+    if (ui->tread_t0 >= 0.0) {
+        const double t = (now - ui->tread_t0) / photo::TREADLE_S;
+        if (t >= 1.0) { ui->tread = tread_to; ui->tread_t0 = -1.0; }
+        else { ui->tread = ui->tread_from + (tread_to - ui->tread_from) * std::fmax(0.0, t); moving = true; }
+    }
+    return moving;
 }
 
 void set_variant(UI* ui, int idx)
 {
     idx = clampi(idx, 0, nlsc::kNumVariants - 1);
     ui->variant = idx;
-    ui->st.variant = nlsc::kVariants[idx].etiqueta;
     if (ui->write) {
         float pv = float(idx);
         ui->write(ui->ctl, PORT_VARIANT, sizeof(float), 0, &pv);
     }
-    ui->necesita_pintar = true;
+    ui->needs_paint = true;
 }
 
 void set_enabled(UI* ui, bool on)
 {
-    ui->st.on = on;
+    ui->on = on;
     if (ui->write) {
         float pv = on ? 1.0f : 0.0f;
         ui->write(ui->ctl, PORT_ENABLED, sizeof(float), 0, &pv);
     }
-    ui->necesita_pintar = true;
+    start_fade(ui);
 }
 
 // --- the dropdown -----------------------------------------------------------
 
+// The list continues the variant display: dark glass inside a bevelled frame like
+// the display's own, the dot-matrix face in the readout's lit green.
 void popup_paint(UI* ui)
 {
     Popup& p = ui->popup;
     if (!p.bufcr) return;
     cairo_t* cr = p.bufcr;
-    const nlsc::ui::Theme& th = ui->tema;
+    const int green = photo::green_of_circuit(nlsc::kVariants[ui->variant].circuit);
+    const unsigned lit = photo::READOUT_HEX[green];
+    const double fw = p.frame;
 
-    nlsc::ui::set_rgb(cr, th.drop_bot);
+    // the frame: dark grey bevel, a light edge on top, a dark one on the inside
+    photo::set_hex(cr, 0x2b2c2e, 1.0);
     cairo_paint(cr);
+    photo::set_hex(cr, 0x55575a, 1.0);
+    cairo_rectangle(cr, 0, 0, p.w, 1.0);
+    cairo_fill(cr);
+    photo::set_hex(cr, 0x151516, 1.0);
+    cairo_rectangle(cr, 0, p.h - 1.0, p.w, 1.0);
+    cairo_fill(cr);
+    photo::set_hex(cr, 0x050505, 1.0);
+    cairo_rectangle(cr, fw - 1.0, fw - 1.0, p.w - 2.0 * fw + 2.0, p.h - 2.0 * fw + 2.0);
+    cairo_fill(cr);
+    // the glass
+    photo::set_hex(cr, 0x0b0c0c, 1.0);
+    cairo_rectangle(cr, fw, fw, p.w - 2.0 * fw, p.h - 2.0 * fw);
+    cairo_fill(cr);
 
-    if (ui->fuentes.mono400) cairo_set_font_face(cr, ui->fuentes.mono400);
+    if (ui->fonts_.doto) cairo_set_font_face(cr, ui->fonts_.doto);
     else cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL,
-                                CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, p.row_h * 0.42);
+                                CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, p.row_h * 0.66);
+    // Doto's dots are thinner than a pixel at list size, so with a fill alone
+    // antialiasing never reaches the colour and the text reads dark. Stroking
+    // the outline too makes every dot a whole pixel.
+    const double dot_stroke = photo::DOT_STROKE_PX * ui_scale(ui);
 
     for (int r = 0; r < nlsc::kNumVariants; ++r) {
-        const double y = r * p.row_h;
-        if (r == ui->variant) {
-            nlsc::ui::set_rgba(cr, th.drop_top, 0.85);
-            cairo_rectangle(cr, 0, y, p.w, p.row_h);
-            cairo_fill(cr);
-        } else if (r == p.sobre) {
-            nlsc::ui::set_rgba(cr, 0xffffff, 0.08);
-            cairo_rectangle(cr, 0, y, p.w, p.row_h);
+        const double y = fw + r * p.row_h;
+        if (r == ui->variant || r == p.hover) {
+            photo::set_hex(cr, lit, r == ui->variant ? 0.22 : 0.10);
+            cairo_rectangle(cr, fw, y, p.w - 2.0 * fw, p.row_h);
             cairo_fill(cr);
         }
+        std::string label = nlsc::kVariants[r].label;
+        for (char& c : label) c = char(std::toupper(static_cast<unsigned char>(c)));
         cairo_text_extents_t e;
-        cairo_text_extents(cr, nlsc::kVariants[r].etiqueta, &e);
-        nlsc::ui::set_rgba(cr, th.drop_texto, r == ui->variant ? 1.0 : 0.85);
-        cairo_move_to(cr, p.row_h * 0.5,
-                      y + (p.row_h + e.height) / 2.0 - e.y_bearing - e.height);
-        cairo_show_text(cr, nlsc::kVariants[r].etiqueta);
+        cairo_text_extents(cr, label.c_str(), &e);
+        photo::set_hex(cr, lit, r == ui->variant || r == p.hover ? 1.0 : 0.85);
+        cairo_move_to(cr, (p.w - e.width) / 2.0 - e.x_bearing,
+                      y + p.row_h / 2.0 - e.height / 2.0 - e.y_bearing);
+        cairo_text_path(cr, label.c_str());
+        cairo_set_line_width(cr, dot_stroke);
+        cairo_stroke_preserve(cr);
+        cairo_fill(cr);
     }
-
-    nlsc::ui::set_rgba(cr, th.print, 0.55);
-    cairo_set_line_width(cr, 1.5);
-    cairo_rectangle(cr, 0.75, 0.75, p.w - 1.5, p.h - 1.5);
-    cairo_stroke(cr);
 
     cairo_surface_flush(p.buf);
     cairo_set_source_surface(p.cr, p.buf, 0, 0);
@@ -322,72 +357,85 @@ void popup_paint(UI* ui)
 void popup_close(UI* ui)
 {
     Popup& p = ui->popup;
-    if (!p.abierto) return;
+    if (!p.is_open) return;
     XUngrabPointer(ui->dpy, CurrentTime);
+    XUngrabKeyboard(ui->dpy, CurrentTime);
     if (p.bufcr) { cairo_destroy(p.bufcr); p.bufcr = nullptr; }
     if (p.buf)   { cairo_surface_destroy(p.buf); p.buf = nullptr; }
     if (p.cr)    { cairo_destroy(p.cr);   p.cr = nullptr; }
     if (p.surf)  { cairo_surface_destroy(p.surf); p.surf = nullptr; }
     if (p.win)   { XDestroyWindow(ui->dpy, p.win); p.win = 0; }
-    p.abierto = false;
-    p.sobre = -1;
+    p.is_open = false;
+    p.hover = -1;
     XFlush(ui->dpy);
 }
 
 void popup_open(UI* ui)
 {
     Popup& p = ui->popup;
-    if (p.abierto) { popup_close(ui); return; }
+    if (p.is_open) { popup_close(ui); return; }
 
     const int scr = DefaultScreen(ui->dpy);
-    p.row_h = int(nlsc::ui::DD_H * ui->scale);
-    if (p.row_h < 16) p.row_h = 16;
-    p.w = int(nlsc::ui::DD_W * ui->scale);
-    p.h = p.row_h * nlsc::kNumVariants;
-    p.sobre = -1;
+    const photo::Box& gl = photo::DISPLAY;          // the black screen
+    const photo::Box& bz = photo::DISPLAY_BEZEL;    // its frame
+    const double f = asset_scale(ui);
+    p.row_h = int(30.0 * ui_scale(ui));
+    if (p.row_h < 18) p.row_h = 18;
+    p.frame = int(std::lround(4.0 * ui_scale(ui)));
+    p.w = int(std::lround((gl.x1 - gl.x0) * f));
+    p.h = p.row_h * nlsc::kNumVariants + 2 * p.frame;
+    p.hover = -1;
 
-    int rx = 0, ry = 0; Window hijo = 0;
+    // Just under the display's frame, exactly as wide as its black screen.
+    int rx = 0, ry = 0; Window child = 0;
     XTranslateCoordinates(ui->dpy, ui->win, ui->root,
-                          int((nlsc::ui::DD_X + nlsc::ui::UI_MARGIN) * ui->scale),
-                          int((nlsc::ui::DD_Y + nlsc::ui::UI_MARGIN + nlsc::ui::DD_H) * ui->scale),
-                          &rx, &ry, &hijo);
+                          ui->ox + int(std::lround(gl.x0 * f)), ui->oy + int(bz.y1 * f),
+                          &rx, &ry, &child);
     // If it would spill past the bottom of the screen, it opens upwards.
     const int sh = DisplayHeight(ui->dpy, scr);
-    if (ry + p.h > sh) ry = ry - int(nlsc::ui::DD_H * ui->scale) - p.h;
+    if (ry + p.h > sh) ry = ry - int((bz.y1 - bz.y0) * f) - p.h;
     if (ry < 0) ry = 0;
 
-    XSetWindowAttributes attr;
+    // The popup is a child of the root but uses the panel's visual, so it needs
+    // that visual's depth and colormap too: under a 32-bit ARGB parent the
+    // root's depth would not match the visual (BadMatch).
+    XSetWindowAttributes attr{};
     attr.override_redirect = True;
     attr.background_pixel = BlackPixel(ui->dpy, scr);
+    attr.border_pixel = 0;
     attr.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask |
-                      PointerMotionMask | LeaveWindowMask;
+                      PointerMotionMask | LeaveWindowMask | KeyPressMask;
+    unsigned long mask = CWOverrideRedirect | CWBackPixel | CWBorderPixel | CWEventMask;
+    if (ui->cmap) { attr.colormap = ui->cmap; mask |= CWColormap; }
     p.win = XCreateWindow(ui->dpy, ui->root, rx, ry, p.w, p.h, 0,
-                          CopyFromParent, InputOutput, ui->visual,
-                          CWOverrideRedirect | CWBackPixel | CWEventMask, &attr);
+                          ui->depth, InputOutput, ui->visual, mask, &attr);
     p.surf = cairo_xlib_surface_create(ui->dpy, p.win, ui->visual, p.w, p.h);
     p.cr   = cairo_create(p.surf);
     p.buf  = cairo_surface_create_similar(p.surf, CAIRO_CONTENT_COLOR, p.w, p.h);
     p.bufcr = cairo_create(p.buf);
 
     XMapRaised(ui->dpy, p.win);
-    // `owner_events` False: EVERY pointer event goes to the popup in its
+    // `owner_events` False: every pointer event goes to the popup in its
     // own coordinates, so a click outside arrives out of range and closes.
-    // The grab can FAIL (`AlreadyGrabbed`: the host or another popup holds
-    // the pointer). Marking the popup open anyway routes every ButtonPress of
-    // the MAIN window through `popup_on_event`, which reads the coordinates as
-    // the popup's: a click on the pedal's top-left corner then "selects a
-    // row" and writes `PORT_VARIANT` — the user changes circuit by clicking
-    // on DRIVE. A failed grab means no
-    // popup, not a blind one.
+    // The grab can fail (`AlreadyGrabbed`: the host or another popup holds
+    // the pointer). An open popup routes every ButtonPress of the main window
+    // through `popup_on_event`, which reads the coordinates as the popup's,
+    // so a click on the panel would select a row; hence a failed grab means
+    // no popup at all.
     if (XGrabPointer(ui->dpy, p.win, False,
                      ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
                      GrabModeAsync, GrabModeAsync, None, None, CurrentTime)
         != GrabSuccess) {
-        p.abierto = true;      // so `popup_close` tears down what was just built
+        p.is_open = true;      // so `popup_close` tears down what was just built
         popup_close(ui);
         return;
     }
-    p.abierto = true;
+    p.is_open = true;
+    int revert = 0;
+    XGetInputFocus(ui->dpy, &p.focus_at_open, &revert);
+    // The keyboard too, so Escape closes the list. A failed keyboard grab
+    // leaves the popup usable by mouse.
+    XGrabKeyboard(ui->dpy, p.win, False, GrabModeAsync, GrabModeAsync, CurrentTime);
     XFlush(ui->dpy);
     popup_paint(ui);
 }
@@ -396,7 +444,7 @@ void popup_open(UI* ui)
 bool popup_on_event(UI* ui, XEvent* ev)
 {
     Popup& p = ui->popup;
-    if (!p.abierto) return false;
+    if (!p.is_open) return false;
 
     switch (ev->type) {
         case Expose:
@@ -406,20 +454,24 @@ bool popup_on_event(UI* ui, XEvent* ev)
         case MotionNotify: {
             const int x = ev->xmotion.x, y = ev->xmotion.y;
             int s = -1;
-            if (x >= 0 && x < p.w && y >= 0 && y < p.h) s = y / p.row_h;
-            // Repaint only if the highlighted row CHANGES: one repaint per
-            // pixel of motion is exactly what must be avoided.
-            if (s != p.sobre) { p.sobre = s; popup_paint(ui); }
+            if (x >= p.frame && x < p.w - p.frame && y >= p.frame && y < p.h - p.frame)
+                s = (y - p.frame) / p.row_h;
+            // Repaint only if the highlighted row changes, not per pixel of
+            // motion.
+            if (s != p.hover) { p.hover = s; popup_paint(ui); }
             return true;
         }
 
         case ButtonPress: {
             const unsigned b = ev->xbutton.button;
             const int x = ev->xbutton.x, y = ev->xbutton.y;
-            const bool dentro = (x >= 0 && x < p.w && y >= 0 && y < p.h);
+            // The frame is not a row: (y - frame) / row_h would truncate a click
+            // on the top edge to row 0.
+            const bool inside = (x >= p.frame && x < p.w - p.frame &&
+                                 y >= p.frame && y < p.h - p.frame);
             if (b == Button1) {
-                if (dentro) {
-                    const int idx = y / p.row_h;
+                if (inside) {
+                    const int idx = (y - p.frame) / p.row_h;
                     if (idx >= 0 && idx < nlsc::kNumVariants) {
                         // The dropdown is no drag, but still a user gesture
                         // on a port: bracketed the same way.
@@ -434,6 +486,10 @@ bool popup_on_event(UI* ui, XEvent* ev)
             return true;
         }
 
+        case KeyPress:
+            if (XLookupKeysym(&ev->xkey, 0) == XK_Escape) popup_close(ui);
+            return true;
+
         default:
             return true;   // while it holds the pointer grab it eats everything
     }
@@ -441,56 +497,49 @@ bool popup_on_event(UI* ui, XEvent* ev)
 
 // --- painting ----------------------------------------------------------------
 
-void haz_buffers(UI* ui)
+void make_buffers(UI* ui)
 {
     if (ui->bufcr)    { cairo_destroy(ui->bufcr); ui->bufcr = nullptr; }
     if (ui->buf)      { cairo_surface_destroy(ui->buf); ui->buf = nullptr; }
-    if (ui->estatica) { cairo_surface_destroy(ui->estatica); ui->estatica = nullptr; }
     ui->buf = cairo_surface_create_similar(ui->surf, CAIRO_CONTENT_COLOR, ui->w, ui->h);
     ui->bufcr = cairo_create(ui->buf);
-    ui->estatica = cairo_surface_create_similar(ui->surf, CAIRO_CONTENT_COLOR,
-                                                ui->w, ui->h);
-    ui->clave = UI::Key{};    // invalidate: the surfaces are new
 }
 
-// Rebuilds the static layer ONLY if its key changed.
-void asegura_estatica(UI* ui)
+photo::View view_of(const UI* ui)
 {
-    UI::Key k;
-    k.w = ui->w; k.h = ui->h;
-    k.on = ui->st.on; k.pressed = ui->st.pressed; k.variant = ui->variant;
-    if (k.w == ui->clave.w && k.h == ui->clave.h && k.on == ui->clave.on &&
-        k.pressed == ui->clave.pressed && k.variant == ui->clave.variant)
-        return;
-
-    cairo_t* cr = cairo_create(ui->estatica);
-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_GOOD);
-    cairo_scale(cr, ui->scale, ui->scale);
-    nlsc::ui::draw_backdrop(cr, nlsc::ui::WINDOW_W, nlsc::ui::WINDOW_H);
-    nlsc::ui::draw_sombra(cr, nlsc::ui::UI_MARGIN + 10, nlsc::ui::UI_MARGIN + 8,
-                          nlsc::ui::PANEL_W - 20, nlsc::ui::PANEL_H - 16, 26);
-    cairo_translate(cr, nlsc::ui::UI_MARGIN, nlsc::ui::UI_MARGIN);
-    nlsc::ui::draw_static(cr, ui->st, &ui->fuentes, &ui->cache.tex, ui->scale,
-                          nlsc::ui::default_theme(), ui->logo);
-    cairo_destroy(cr);
-    cairo_surface_flush(ui->estatica);
-    ui->clave = k;
+    photo::View v;
+    v.drive = ui->knob[0]; v.level = ui->knob[1]; v.tone = ui->knob[2];
+    v.green = photo::green_of_circuit(nlsc::kVariants[ui->variant].circuit);
+    v.lit = ui->lit;
+    v.treadle = ui->tread;
+    // In bypass the display is dark, and lights while hovered or
+    // while the list is open, so a variant is never changed blind.
+    v.display_lit = ui->on || ui->display_hover || ui->popup.is_open;
+    v.variant = nlsc::kVariants[ui->variant].label;
+    v.face = ui->fonts_.doto;
+    return v;
 }
 
 void paint(UI* ui)
 {
     if (!ui->cr || !ui->bufcr) return;
-    asegura_estatica(ui);
+    const photo::View v = view_of(ui);
+    if (ui->assets.green != v.green) {       // the variant changed circuit: the other paint
+        photo::free_scaled(ui->scaled);
+        photo::free_assets(ui->assets);
+        ui->assets = photo::load_assets(ui->photo_dir, v.green);
+    }
+    photo::ensure_scaled(ui->scaled, ui->assets, asset_scale(ui));
 
     cairo_t* cr = ui->bufcr;
     cairo_identity_matrix(cr);
-    cairo_set_source_surface(cr, ui->estatica, 0, 0);
-    cairo_paint(cr);
     cairo_set_antialias(cr, CAIRO_ANTIALIAS_GOOD);
-    cairo_translate(cr, nlsc::ui::UI_MARGIN * ui->scale,
-                        nlsc::ui::UI_MARGIN * ui->scale);
-    cairo_scale(cr, ui->scale, ui->scale);
-    nlsc::ui::draw_live(cr, ui->st, &ui->cache);
+    if (ui->ox > 0 || ui->oy > 0) {          // the margins around the fitted pedal
+        photo::set_hex(cr, photo::BACKDROP_HEX, 1.0);
+        cairo_paint(cr);
+    }
+    cairo_translate(cr, ui->ox, ui->oy);     // integer: the frames stay on the plate's pixel grid
+    photo::draw_panel(cr, ui->scaled, v);
     cairo_surface_flush(ui->buf);
 
     // A single blit to the window: it is never seen half-drawn.
@@ -505,16 +554,17 @@ void on_event(UI* ui, XEvent* ev)
 {
     switch (ev->type) {
         case Expose:
-            if (ev->xexpose.count == 0) ui->necesita_pintar = true;
+            if (ev->xexpose.count == 0) ui->needs_paint = true;
             break;
 
         case ConfigureNotify: {
             const int nw = ev->xconfigure.width, nh = ev->xconfigure.height;
             if (nw != ui->w || nh != ui->h) {
                 ui->w = nw; ui->h = nh;
+                update_fit(ui);
                 cairo_xlib_surface_set_size(ui->surf, nw, nh);
-                haz_buffers(ui);
-                ui->necesita_pintar = true;
+                make_buffers(ui);
+                ui->needs_paint = true;
             }
             break;
         }
@@ -523,21 +573,19 @@ void on_event(UI* ui, XEvent* ev)
             const unsigned b = ev->xbutton.button;
             const double px = ev->xbutton.x, py = ev->xbutton.y;
             if (b == Button1) {
-                // ORDER MATTERS: the first hit keeps the click. Tested
-                // from smallest to largest box and NONE overlaps another —
-                // checked against `ui_draw.h`'s geometry: DRIVE's and
-                // TONE's centres sit 144 units apart with radii summing 86,
-                // and the footswitch (y=494±51) and dropdown (y=622..660)
-                // do not touch.
+                // No zone overlaps another (the scene's projection: DRIVE's and
+                // TONE's centres sit 210 asset px apart with radii summing 151,
+                // and the display bezel ends ~270 px above the treadle), so
+                // the order of the tests does not decide anything.
                 const int i = knob_impact(ui, px, py);
                 if (i >= 0) {
-                    ui->arrastre = i;
-                    ui->arr_y0   = py;
-                    ui->arr_v0   = knob_value(ui, i);
-                    notify_touch(ui, ui->knobs[i].puerto, true);
+                    ui->drag = i;
+                    ui->drag_y0   = py;
+                    ui->drag_v0   = knob_value(ui, i);
+                    notify_touch(ui, KNOB_PORT[i], true);
                 } else if (hit_footswitch(ui, px, py)) {
-                    ui->st.pressed = true;          // it SINKS while held down
-                    ui->necesita_pintar = true;
+                    ui->pressed = true;             // it sinks while held down
+                    start_treadle(ui);
                 } else if (hit_dropdown(ui, px, py)) {
                     popup_open(ui);
                 }
@@ -547,9 +595,10 @@ void on_event(UI* ui, XEvent* ev)
                     const double step = (b == Button4) ? WHEEL_STEP : -WHEEL_STEP;
                     // The wheel is a gesture too: bracketed with touch, or
                     // the host sees an orphan write.
-                    notify_touch(ui, ui->knobs[i].puerto, true);
+                    notify_touch(ui, KNOB_PORT[i], true);
                     set_knob(ui, i, knob_value(ui, i) + step);
-                    notify_touch(ui, ui->knobs[i].puerto, false);
+                    flush_knobs(ui);
+                    notify_touch(ui, KNOB_PORT[i], false);
                 }
             }
             break;
@@ -557,30 +606,50 @@ void on_event(UI* ui, XEvent* ev)
 
         case ButtonRelease:
             if (ev->xbutton.button == Button1) {
-                if (ui->arrastre >= 0) {
-                    notify_touch(ui, ui->knobs[ui->arrastre].puerto, false);
-                    ui->arrastre = -1;
+                if (ui->drag >= 0) {
+                    flush_knobs(ui);
+                    notify_touch(ui, KNOB_PORT[ui->drag], false);
+                    ui->drag = -1;
                 }
-                if (ui->st.pressed) {
-                    ui->st.pressed = false;
-                    // The footswitch toggles ON RELEASE, and only released
+                if (ui->pressed) {
+                    ui->pressed = false;
+                    start_treadle(ui);
+                    // The footswitch toggles on release, and only released
                     // on top: dragging away and releasing cancels, like any
                     // button.
                     if (hit_footswitch(ui, ev->xbutton.x, ev->xbutton.y)) {
                         notify_touch(ui, PORT_ENABLED, true);
-                        set_enabled(ui, !ui->st.on);
+                        set_enabled(ui, !ui->on);
                         notify_touch(ui, PORT_ENABLED, false);
                     }
-                    ui->necesita_pintar = true;
                 }
             }
             break;
 
         case MotionNotify:
-            if (ui->arrastre >= 0) {
-                const double dy = ui->arr_y0 - ev->xmotion.y;
-                set_knob(ui, ui->arrastre, ui->arr_v0 + dy / (DRAG_PX * ui->scale));
+            if (ui->drag >= 0 && !(ev->xmotion.state & Button1Mask)) {
+                // The button is up and the release never arrived (another
+                // client grabbed the pointer mid-drag): end the drag here, or
+                // the knob stays stuck to the mouse and the host's touch
+                // bracket is never closed.
+                flush_knobs(ui);
+                notify_touch(ui, KNOB_PORT[ui->drag], false);
+                ui->drag = -1;
+            } else if (ui->drag >= 0) {
+                const double dy = ui->drag_y0 - ev->xmotion.y;
+                set_knob(ui, ui->drag, ui->drag_v0 + dy / (DRAG_PX * ui_scale(ui)));
+            } else {
+                const bool over = hit_dropdown(ui, ev->xmotion.x, ev->xmotion.y);
+                if (over != ui->display_hover) { ui->display_hover = over; ui->needs_paint = true; }
             }
+            break;
+
+        case LeaveNotify:
+            if (ui->display_hover) { ui->display_hover = false; ui->needs_paint = true; }
+            break;
+
+        case UnmapNotify:          // the pedal's window hidden: its list goes with it
+            popup_close(ui);
             break;
 
         default:
@@ -589,6 +658,41 @@ void on_event(UI* ui, XEvent* ev)
 }
 
 // --- LV2UI entry points -------------------------------------------------------
+
+// X errors. Xlib's default handler exit()s the whole process -- the host -- on
+// any protocol error, and a parent window whose visual we do not match (a
+// 32-bit ARGB parent) or one the server does not know raises one. While any
+// instance of this UI is alive, a handler records errors on our connections and
+// hands every other error to whatever handler was installed before (the host's).
+// The handler is process-wide by Xlib's design, so it is installed with the
+// first instance and restored with the last.
+// NLSC_UI_PARENT_VISUAL=0 builds a plain window with the default visual and no
+// error handler; it is not used by the plugin.
+#ifndef NLSC_UI_PARENT_VISUAL
+#define NLSC_UI_PARENT_VISUAL 1
+#endif
+
+#if NLSC_UI_PARENT_VISUAL
+int (*g_prev_x_handler)(Display*, XErrorEvent*) = nullptr;
+int  g_ui_instances = 0;
+Display* g_ui_displays[16] = {};
+bool g_x_error = false;
+
+int ui_x_error(Display* d, XErrorEvent* e)
+{
+    for (Display* ours : g_ui_displays)
+        if (ours == d) { g_x_error = true; return 0; }
+    return g_prev_x_handler ? g_prev_x_handler(d, e) : 0;
+}
+
+void track_display(Display* d, bool add)
+{
+    for (Display*& slot : g_ui_displays)
+        if (add ? slot == nullptr : slot == d) { slot = add ? d : nullptr; return; }
+}
+#endif
+
+void cleanup(LV2UI_Handle handle);
 
 LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundle_path,
                          LV2UI_Write_Function write_function,
@@ -619,9 +723,8 @@ LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundl
     ui->ctl   = controller;
     ui->touch = touch;
 
-    // `ui:scaleFactor`: the host SAYS what scale it wants the window at
-    // on HiDPI screens. The workshop used to deduce it from Cairo's
-    // matrix, which is guessing. If the host does not pass it, 1,0 and go.
+    // `ui:scaleFactor`: the host states what scale it wants the window at
+    // on HiDPI screens. If the host does not pass it, 1.0.
     ui->scale = 1.0;
     if (options && map) {
         const LV2_URID urid_scale = map->map(map->handle, LV2_UI__scaleFactor);
@@ -634,44 +737,82 @@ LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundl
         }
     }
 
-    ui->w = int(nlsc::ui::WINDOW_W * ui->scale);
-    ui->h = int(nlsc::ui::WINDOW_H * ui->scale);
+    ui->w = int(std::ceil(photo::LOGICAL_W * ui->scale));
+    ui->h = int(std::ceil(photo::LOGICAL_H * ui->scale));
+    update_fit(ui);
 
     ui->dpy = XOpenDisplay(nullptr);
     if (!ui->dpy) { delete ui; return nullptr; }
 
     const int screen = DefaultScreen(ui->dpy);
     ui->visual = DefaultVisual(ui->dpy, screen);
+    ui->depth  = DefaultDepth(ui->dpy, screen);
     ui->root   = RootWindow(ui->dpy, screen);
     ui->parent = parent ? parent : ui->root;
 
+#if NLSC_UI_PARENT_VISUAL
+    if (g_ui_instances++ == 0) { g_x_error = false; g_prev_x_handler = XSetErrorHandler(ui_x_error); }
+    track_display(ui->dpy, true);
+    g_x_error = false;
+    // The window takes the parent's visual and depth, and so does the cairo
+    // surface: a child of another depth cannot be drawn into its parent.
+    XWindowAttributes pa;
+    if (XGetWindowAttributes(ui->dpy, ui->parent, &pa) && !g_x_error) {
+        ui->visual = pa.visual;
+        ui->depth  = pa.depth;
+    }
+    XSetWindowAttributes wa{};
+    unsigned long mask = CWBackPixel | CWBorderPixel;
+    wa.background_pixel = 0;
+    wa.border_pixel = 0;
+    if (ui->visual != DefaultVisual(ui->dpy, screen)) {
+        ui->cmap = XCreateColormap(ui->dpy, ui->root, ui->visual, AllocNone);
+        wa.colormap = ui->cmap;
+        mask |= CWColormap;
+    }
+    ui->win = XCreateWindow(ui->dpy, ui->parent, 0, 0, (unsigned)ui->w, (unsigned)ui->h, 0,
+                            ui->depth, InputOutput, ui->visual, mask, &wa);
+    XSync(ui->dpy, False);
+    if (!ui->win || g_x_error) {   // e.g. a parent the server does not know
+        ui->win = 0;
+        cleanup(ui);
+        return nullptr;
+    }
+#else
     ui->win = XCreateSimpleWindow(ui->dpy, ui->parent, 0, 0,
                                   (unsigned)ui->w, (unsigned)ui->h, 0,
                                   BlackPixel(ui->dpy, screen),
                                   BlackPixel(ui->dpy, screen));
     if (!ui->win) { XCloseDisplay(ui->dpy); delete ui; return nullptr; }
+#endif
+
+    // Size hints for a host that resizes the plugin window: keep the pedal's
+    // proportions, never below half its size. The drawing fits whatever size it gets.
+    if (XSizeHints* sh = XAllocSizeHints()) {
+        sh->flags = PMinSize | PAspect | PBaseSize;
+        sh->min_width  = int(photo::LOGICAL_W / 2);
+        sh->min_height = int(photo::LOGICAL_H / 2);
+        sh->base_width = ui->w; sh->base_height = ui->h;
+        sh->min_aspect.x = sh->max_aspect.x = int(photo::ASSET_W);
+        sh->min_aspect.y = sh->max_aspect.y = int(photo::ASSET_H);
+        XSetWMNormalHints(ui->dpy, ui->win, sh);
+        XFree(sh);
+    }
 
     XSelectInput(ui->dpy, ui->win,
                  ExposureMask | StructureNotifyMask | ButtonPressMask |
-                 ButtonReleaseMask | PointerMotionMask | ButtonMotionMask);
+                 ButtonReleaseMask | PointerMotionMask | ButtonMotionMask |
+                 LeaveWindowMask);
 
     ui->surf = cairo_xlib_surface_create(ui->dpy, ui->win, ui->visual, ui->w, ui->h);
     ui->cr   = cairo_create(ui->surf);
-    haz_buffers(ui);
+    make_buffers(ui);
 
-    // The fonts travel INSIDE the bundle: loaded from there so the panel
-    // looks the same in any host, whatever it has installed.
-    ui->fuentes = nlsc::ui::load_fonts(bundle_path ? bundle_path : "");
-    // The logo travels in the bundle beside the fonts, by the same path.
-    ui->logo = nlsc::ui::load_logo(bundle_path ? bundle_path : "");
-    ui->cache   = nlsc::ui::make_cache(ui->scale);
-
-    ui->knobs[0] = { nlsc::ui::DRIVE_CX, nlsc::ui::DRIVE_CY, nlsc::ui::DRIVE_R, PORT_DRIVE };
-    ui->knobs[1] = { nlsc::ui::LEVEL_CX, nlsc::ui::LEVEL_CY, nlsc::ui::LEVEL_R, PORT_LEVEL };
-    ui->knobs[2] = { nlsc::ui::TONE_CX,  nlsc::ui::TONE_CY,  nlsc::ui::TONE_R,  PORT_TONE  };
-    ui->n_knobs = 3;
-
-    ui->st.variant = nlsc::kVariants[ui->variant].etiqueta;
+    // The fonts and the panel images travel inside the bundle: loaded from
+    // there so the panel looks the same in any host, whatever it has installed.
+    const std::string bundle = bundle_path ? bundle_path : "";
+    ui->fonts_  = nlsc::ui::load_fonts(bundle);
+    ui->photo_dir = (bundle.empty() ? std::string(".") : bundle) + "/photo";   // loaded at the first paint
 
     XMapWindow(ui->dpy, ui->win);
     XFlush(ui->dpy);
@@ -687,16 +828,23 @@ void cleanup(LV2UI_Handle handle)
 {
     auto* ui = static_cast<UI*>(handle);
     popup_close(ui);
-    nlsc::ui::free_cache(ui->cache);
-    nlsc::ui::free_fonts(ui->fuentes);
-    nlsc::ui::free_logo(ui->logo);
+    photo::free_scaled(ui->scaled);
+    photo::free_assets(ui->assets);
+    nlsc::ui::free_fonts(ui->fonts_);
     if (ui->bufcr)    cairo_destroy(ui->bufcr);
     if (ui->buf)      cairo_surface_destroy(ui->buf);
-    if (ui->estatica) cairo_surface_destroy(ui->estatica);
     if (ui->cr)       cairo_destroy(ui->cr);
     if (ui->surf)     cairo_surface_destroy(ui->surf);
     if (ui->win)      XDestroyWindow(ui->dpy, ui->win);
-    if (ui->dpy)      XCloseDisplay(ui->dpy);
+    if (ui->cmap)     XFreeColormap(ui->dpy, ui->cmap);
+    if (ui->dpy) {
+        XSync(ui->dpy, False);
+        XCloseDisplay(ui->dpy);
+#if NLSC_UI_PARENT_VISUAL
+        track_display(ui->dpy, false);
+        if (--g_ui_instances == 0) XSetErrorHandler(g_prev_x_handler);
+#endif
+    }
     delete ui;
 }
 
@@ -706,20 +854,29 @@ void port_event(LV2UI_Handle handle, uint32_t port, uint32_t buffer_size,
     if (format != 0 || buffer_size < sizeof(float)) return;
     auto* ui = static_cast<UI*>(handle);
     const float v = *static_cast<const float*>(buffer);
+    // A non-finite value from the host is ignored: it would reach the knob
+    // drawing (an out-of-range knurl index, and a cairo context stuck in an
+    // error state so the window never repaints) and be written back to the
+    // DSP on the next drag.
+    if (!std::isfinite(v)) return;
     switch (port) {
-        case PORT_DRIVE:   ui->st.drive = clamp01(v); break;
-        case PORT_TONE:    ui->st.tone  = clamp01(v); break;
-        case PORT_LEVEL:   ui->st.level = clamp01(v); break;
-        case PORT_ENABLED: ui->st.on    = (v >= 0.5f); break;
+        // A knob with a write still pending keeps the user's newer value.
+        case PORT_DRIVE:   if (!ui->knob_dirty[0]) ui->knob[0] = clamp01(v); break;
+        case PORT_LEVEL:   if (!ui->knob_dirty[1]) ui->knob[1] = clamp01(v); break;
+        case PORT_TONE:    if (!ui->knob_dirty[2]) ui->knob[2] = clamp01(v); break;
+        case PORT_ENABLED:
+            if ((v >= 0.5f) != ui->on) { ui->on = (v >= 0.5f); start_fade(ui); }
+            break;
         case PORT_VARIANT: {
-            const int idx = clampi(int(v + 0.5f), 0, nlsc::kNumVariants - 1);
+            // Clamped as a float first: int() of a value past INT_MAX is UB.
+            const float vc = std::fmin(float(nlsc::kNumVariants - 1), std::fmax(0.0f, v));
+            const int idx = clampi(int(vc + 0.5f), 0, nlsc::kNumVariants - 1);
             ui->variant = idx;
-            ui->st.variant = nlsc::kVariants[idx].etiqueta;
             break;
         }
         default: return;
     }
-    ui->necesita_pintar = true;
+    ui->needs_paint = true;
 }
 
 // LV2's `idle` interface: pump X events and repaint when due.
@@ -730,7 +887,7 @@ int ui_idle(LV2UI_Handle handle)
     while (XPending(ui->dpy)) {
         XEvent ev;
         XNextEvent(ui->dpy, &ev);
-        if (ui->popup.abierto &&
+        if (ui->popup.is_open &&
             (ev.xany.window == ui->popup.win || ev.type == ButtonPress ||
              ev.type == ButtonRelease || ev.type == MotionNotify)) {
             popup_on_event(ui, &ev);          // the popup holds the pointer grab
@@ -738,21 +895,26 @@ int ui_idle(LV2UI_Handle handle)
             on_event(ui, &ev);
         }
     }
-    // THERE IS NO FRAME-RATE CAP HERE, and that is deliberate: knobs moved in
-    // visible steps while there was one, because TWO limiters were beating
-    // against each other. The loop above already drains EVERY pending event and
-    // paints ONCE, so the batching a cap claims to add is already done. All a
-    // cap adds is a second clock, and since the host calls `ui_idle` at ITS own
-    // rate the two rates beat: with the host calling every 40 ms and a cap
-    // demanding 33,3 since the last paint, one turn in two is skipped. That is
-    // the visible step -- not the ports, which are continuous 0..1, nor the
-    // drag, which is `dy/200` and unquantised.
+    // There is deliberately no frame-rate cap: the loop above already drains
+    // every pending event and paints once per turn. A cap would be a second
+    // clock beating against the host's idle rate and skipping turns, which
+    // shows as knobs moving in visible steps.
     //
-    // => A redundant limiter is not neutral: it can only remove frames, and it
-    // costs more the faster the host calls.
-    if (ui->necesita_pintar) {
-        ui->necesita_pintar = false;
-        ui->ultimo_pintado = ahora_s();
+    // The list closes when the keyboard focus moves away from where it was when
+    // it opened: an override-redirect list has no window manager to hide it, so
+    // after switching application it would float over whatever is in front.
+    // Polled, not an event: under XWayland the grabs do not stop a Wayland
+    // window taking the focus, and the FocusOut they raise also fires when the
+    // grab is merely refused.
+    if (ui->popup.is_open) {
+        Window fw = 0; int revert = 0;
+        XGetInputFocus(ui->dpy, &fw, &revert);
+        if (fw != ui->popup.focus_at_open) popup_close(ui);
+    }
+    flush_knobs(ui);
+    if (animate(ui, seconds_now())) ui->needs_paint = true;
+    if (ui->needs_paint) {
+        ui->needs_paint = false;
         paint(ui);
     }
     return 0;

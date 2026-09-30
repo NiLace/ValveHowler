@@ -3,7 +3,7 @@
 <p align="center"><img src="assets/images/panel.png" alt="Valve Howler" width="260"></p>
 
 Valve Howler is a **smooth overdrive** for guitar and bass that runs on Linux as a
-mono **LV2** plugin, with its own hardware-style interface. It is the classic
+mono **LV2** plugin, with its own rendered interface. It is the classic
 valve screamer-style circuit, modelled from the schematic rather than fitted to a
 curve or captured from a unit: every stage is derived from the components and their
 equations, and its coefficients are generated from the netlist.
@@ -39,8 +39,10 @@ network the pedal is. The arbiter throughout development was **ngspice** running
 the same netlist: not a listening test, and not a capture of somebody's unit.
 
 The non-linear part runs at **4× internally** so its harmonics don't fold back into
-the audible band. That costs **7 samples** of latency at any session rate; the
-plugin reports it and the host compensates.
+the audible band. That costs **31 samples** of latency at any session rate (0.65 ms at 48 kHz); the
+plugin reports it and the host compensates. The resampling filters are long enough
+to keep the top octave: the 17th and 19th harmonics of a 1 kHz note (18 and 20 kHz)
+come out within 0.6 dB of the same plugin run at 192 kHz.
 
 ## The front panel
 
@@ -53,13 +55,17 @@ Three knobs and a footswitch, like the pedal:
 - **Level** — the output volume.
 - The **footswitch** is the bypass. It is wired to the host's standard *enabled*
   control, so the host understands it as a bypass and can automate it, rather than
-  it being an invented toggle only this plugin knows about. The name lights up when
-  the pedal is engaged.
+  it being an invented toggle only this plugin knows about. Engaged, the name and the
+  knob labels are printed in blue; bypassed, they fade to grey and the variant
+  display goes dark.
 
-Drag a knob up or down to set it. Along the bottom is the **variant selector**.
+Drag a knob up or down to set it, or use the mouse wheel. Between the knobs and the
+footswitch is the **variant display**: click it to choose a variant. While the pedal
+is bypassed it lights up under the mouse, so a variant is never picked blind.
+The box takes the colour of the circuit the variant uses.
 
 Two details worth knowing about the bypass. The dry signal leaves **delayed by the
-same 7 samples** the plugin reports — deliberately, so that mixing in parallel with
+same 31 samples** the plugin reports — deliberately, so that mixing in parallel with
 a dry path stays aligned instead of eating a comb filter. And it crossfades over
 about 10 ms rather than switching hard, because the engine's resting output isn't
 zero and a hard jump would click.
@@ -127,25 +133,24 @@ You'll need a C++17 compiler, the LV2 development headers, and Cairo, Xlib and
 FreeType for the interface. Nothing else is vendored.
 
 ```sh
-make                                           # plugin + interface + fonts
+make                                           # plugin + interface + font + images
 make install                                   # installs to ~/.lv2/valvehowler.lv2/
 make install INSTALL_DIR=/usr/local/lib/lv2    # or wherever your host scans
 ```
 
-`make install` is atomic — it writes a temporary directory and renames it over the
-old one — because copying over a `.so` while a host has it memory-mapped will
-corrupt the running process and take the host down with it. `make test` runs a
-smoke check over the bundle it just built: that both entry points survived the
-hidden-visibility build, and that every file the interface loads at run time is
-actually in it.
+`make install` replaces an installed copy safely, even while a host has the plugin
+loaded. `make test` checks that the bundle you just built is complete.
 
 ## Third-party components
 
-- **Fonts** (`assets/fonts/`) — Archivo, Barlow Condensed and Space Mono, under the
-  SIL Open Font License 1.1 (full text and copyright notices sit beside them). They
-  stay under the OFL and are not relicensed under the GPL. They travel inside the
-  bundle because the interface loads them directly rather than through the system's
-  font configuration.
+- **Font** (`assets/fonts/`) — Doto, © The Doto Project Authors, under the SIL Open
+  Font License 1.1 (full text beside it). It stays under the OFL and is not relicensed
+  under the GPL. It travels inside the bundle because the interface draws the variant
+  display with it directly rather than through the system's font configuration.
+- **Interface images** (`gui/photo/`, `assets/images/`) — renders of our own 3D scene
+  of the pedal, lit with the `studio_small_08` HDRI from
+  [Poly Haven](https://polyhaven.com/a/studio_small_08) (CC0). The lettering in the
+  renders is set in Barlow, Barlow Condensed and Doto (all SIL Open Font License 1.1).
 
 ## How this was made, and the license
 

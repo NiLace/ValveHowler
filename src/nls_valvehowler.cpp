@@ -1,56 +1,34 @@
 // Valve Howler — an overdrive modelled from the circuit.
 //
-// The oversampling factor is a user-facing QUALITY SWITCH (2/4/8/16x), not a
-// constant. The three criteria are measured and pull in different
-// directions (docs/FIDELIDAD_VS_SOBREMUESTREO.md):
-//     aliasing with guitar ..... 2x     (docs/SOBREMUESTREO.md)
-//     fidelity (output null) ... 8x     first factor to reach −80 dB
-//     real time ................ 2x     the «8x costs 217 % of one core on the dev
-//                                        box» that stood here was stale twice over: it
-//                                        named no machine (it was the LAPTOP) and it
-//                                        priced an engine that no longer exists. On the
-//                                        i7-8700K the shipped cascade at 8x is 5,54 %,
-//                                        and at the 4x it ships, 2,61 %.
-// No single value satisfies all three, so the choice is exposed instead of
-// hidden.
+// This file is the LV2 scaffolding: descriptor, ports and the one-time choice
+// between the two builds of the engine (generic x86-64, or AVX2/FMA when the
+// CPU has it). The DSP lives in `nls_core.h`, compiled twice by
+// `nls_isa_tu.cpp`. The oversampling factor is fixed at 4x (`kOsFactor`).
 //
-// THE DEFAULT IS 4x, decided on the ANMR yardstick over real material; the
-// `.ttl` states it: "8x adds 21 dB of margin for DOUBLE the CPU: not
-// justified". The −80 dB criterion above is SUPERSEDED by that measurement —
-// it stays written because it explains where the switch came from.
-//
-// Mounted from the first commit, because retrofitting is what costs:
 //   - Entry point wrapped in extern "C".
-//   - Precision parametrised by typedef, NOT hard-wired.
-//   - FTZ/DAZ armed at instantiation.
+//   - Precision parametrised by typedef, not hard-wired.
+//   - FTZ/DAZ for the duration of each DSP call, restored on exit.
 //   - run() with no allocation, no exceptions, no locks.
 
-// `NLSC_TONE_W`'s default USED TO LIVE HERE, and this file does not
-// include the core — the ISA dispatch moved the engine into its own
-// translation unit, so the macro never reached the code that reads it and the
-// product shipped a LINEAR tone law for thirteen days. The default now lives
-// in `nls_core.h`, next to its only use. Do not restore a copy here:
-// `-DNLSC_TONE_W=0` on the command line still reaches both units.
+// Engine macros (e.g. `NLSC_TONE_W`) take their defaults in the engine's own
+// headers: this file does not include the core, so a default placed here
+// would never reach it. `-D` on the command line reaches both units.
 
-#include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
-#include <new>
 #include <lv2.h>
 
-// THIS BLOCK GOES BEFORE EVERYTHING ELSE: `arm_denormal_flush()` consults
-// this macro, and below it its body would come out EMPTY with no warning.
+// This block goes before everything else: `DenormalGuard` consults this
+// macro, and placed after it the guard's body would compile empty with no
+// warning.
 #if defined(__SSE2__) || defined(__x86_64__)
 #  include <pmmintrin.h>
 #  include <xmmintrin.h>
 #  define NLSC_HAVE_X86_DENORMAL_CTRL 1
 #endif
 
-// THIS FILE HAS NO DSP LEFT.
-//
-// The core compiles TWICE in `nls_isa_tu.cpp` — baseline and avx2/fma — and
-// here the only thing chosen is which one, ONCE, in `instantiate()`.
+// The core compiles twice in `nls_isa_tu.cpp` (baseline and avx2/fma), and
+// here the only thing chosen is which one, once, in `instantiate()`.
 // Everything below talks to `nlsc::ICore`, an interface with nothing of the
 // engine inside.
 #include "nls_iface.h"
@@ -58,55 +36,55 @@
 namespace nlsc {
 
 
-// Flush denormals to zero.
+// Flush denormals to zero for the duration of a call, and give the thread
+// back as it was found.
 //
-// THIS COMMENT USED TO CLAIM TWO FALSE THINGS, and both were measured. It
-// said "without this the CPU spikes as the signal decays to silence", and
-// that it is armed per instance "because the host does not guarantee which
-// thread runs run()" — the second was also a non-sequitur, since arming in
-// `instantiate()` does not answer that.
+// The MXCSR belongs to the thread, not to the instance. Leaving it set would
+// change the floating-point mode of whatever thread the host used for the
+// call (its main or GUI thread, or a worker) for good, and would still not
+// guarantee the audio thread that runs `run()`.
 //
-// WHAT IS MEASURED: in this engine the guard sustains nothing. 60 s of exact
-// digital silence produce ZERO denormals, because a physically modelled
-// circuit does not decay to zero: it settles at its rest point (|y| pinned
-// at 5,66e-08 and the states at their DC). A chord's tail does not drive the
-// state towards denormals; it drives it towards the bias. Zero denormals as
-// well over 5,76 M samples of real material.
+// So the mode is set on entry to each LV2 call that runs DSP and restored on
+// exit. It costs two MXCSR accesses per block, and the host's own denormal
+// setting is back in place the moment the call returns.
 //
-// AND WHY IT IS NOT ARMED IN `process()`, which would be the only place
-// that guarantees the audio thread: the MXCSR belongs to the THREAD, not to
-// the instance, so re-arming per block imposes FTZ/DAZ on the HOST's thread —
-// stomping on the rest of the graph and on Ardour's explicit "Denormal
-// Protection" preference. Measured: it buys nothing (+1,95 %, 13 of 21
-// pairs, i.e. noise) in a scenario that additionally requires the host to
-// inject denormals. It stays where it is: cheap, and it steps on nobody.
-static inline void arm_denormal_flush()
-{
+// Digital silence produces no denormals in this engine, because a physically
+// modelled circuit settles at its rest point instead of decaying to zero. The
+// guard is a net for what the host feeds in, not a cost fix.
+class DenormalGuard {
+public:
+    DenormalGuard() noexcept
+    {
 #ifdef NLSC_HAVE_X86_DENORMAL_CTRL
-    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+        saved_ = _mm_getcsr();
+        _mm_setcsr(saved_ | 0x8040u);   // FTZ (bit 15) | DAZ (bit 6)
 #endif
-}
+    }
+    ~DenormalGuard() noexcept
+    {
+#ifdef NLSC_HAVE_X86_DENORMAL_CTRL
+        _mm_setcsr(saved_);
+#endif
+    }
+    DenormalGuard(const DenormalGuard&) = delete;
+    DenormalGuard& operator=(const DenormalGuard&) = delete;
+private:
+#ifdef NLSC_HAVE_X86_DENORMAL_CTRL
+    unsigned int saved_ = 0;
+#endif
+};
 
-// THE DISPATCH, and it happens ONCE PER INSTANCE.
+// The ISA dispatch, once per instance.
 //
-// Checking `__AVX2__` would be wrong: that is what the COMPILER supported,
-// not what the machine running has. `__builtin_cpu_supports` reads CPUID at
-// run time.
-// BOTH are required: AVX2 and FMA3 arrived together with Haswell, but they
+// `__AVX2__` would say what the compiler supported, not what the running
+// machine has; `__builtin_cpu_supports` reads CPUID at run time.
+// Both are required: AVX2 and FMA3 arrived together with Haswell, but they
 // are queried separately and a hypervisor can mask just one.
 bool has_v3()
 {
-    // THE NEGATIVE LEG OF THIS MECHANISM — without it, it does not exist.
-    //
-    // On a modern machine `has_v3()` is ALWAYS true, so the BASELINE path is
-    // exercised by nobody: it could be broken and no gate would see it — and
-    // it is exactly the path that will run on pre-2013 CPUs, where we cannot
-    // test.
-    //
-    // `NLSC_FORCE_BASE=1` in the environment forces the baseline engine.
-    // HARNESS-ONLY: the installed plugin never sees that variable in a
-    // normal session, and if it is set, the harness says so, not the audio.
+    // `NLSC_FORCE_BASE=1` in the environment forces the baseline engine, so
+    // the baseline path can be exercised on a machine that has AVX2/FMA.
+    // A normal session never sets it.
     if (const char* f = std::getenv("NLSC_FORCE_BASE"))
         if (f[0] == '1') return false;
 #if defined(__x86_64__)
@@ -125,7 +103,7 @@ bool has_v3()
 static LV2_Handle instantiate(const LV2_Descriptor*, double rate,
                               const char*, const LV2_Feature* const*)
 {
-    nlsc::arm_denormal_flush();
+    nlsc::DenormalGuard fp;
     nlsc::ICore* self = nlsc::has_v3() ? nlsc::make_v3() : nlsc::make_base();
     if (self) self->prepare(rate);
     return static_cast<LV2_Handle>(self);   // nullptr => the host discards the instance
@@ -138,17 +116,16 @@ static void connect_port(LV2_Handle instance, uint32_t port, void* data)
 
 static void activate(LV2_Handle instance)
 {
-    // activate() may run on a different thread than instantiate(), and the
-    // denormal control is PER THREAD: re-arming here is not redundant.
-    nlsc::arm_denormal_flush();
+    // The same mode as `run()` while the state is rebuilt, then restored.
+    nlsc::DenormalGuard fp;
     static_cast<nlsc::ICore*>(instance)->reset();
 }
 
 static void run(LV2_Handle instance, uint32_t n_samples)
 {
-    // THE ONLY dispatch indirection: 375 calls per second at 128 samples
-    // and 48 kHz. The per-SAMPLE attempt (192 000/s) cost more than it
-    // bought.
+    // The only dispatch indirection, once per block: 375 calls per second
+    // at 128 samples and 48 kHz.
+    nlsc::DenormalGuard fp;
     static_cast<nlsc::ICore*>(instance)->process(n_samples);
 }
 

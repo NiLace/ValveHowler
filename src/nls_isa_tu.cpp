@@ -1,27 +1,24 @@
-// nls_isa_tu.cpp — the CORE, compiled TWICE with different flags.
+// nls_isa_tu.cpp — the core, compiled twice with different flags.
 //
 // Built once per instruction set:
 //
 //     -DNLSC_ISA_NS=isa_base -DNLSC_ISA_FACTORY=make_base   $(ARCH)
 //     -DNLSC_ISA_NS=isa_v3   -DNLSC_ISA_FACTORY=make_v3     $(ARCH_V3)
 //
-// What keeps the linker from merging the two copies is the NAMESPACE, not
-// visibility: `dk::Engine::newton` becomes `isa_base::nlsc::dk::Engine::newton`
-// and `isa_v3::nlsc::dk::Engine::newton`, which are distinct symbols. Without
-// this the ODR is violated in silence: it compiles, it links, and BOTH routes
-// end up running the SAME version.
+// What keeps the linker from merging the two copies is the namespace, not
+// visibility: `nlsc::Plugin::process` becomes `isa_base::nlsc::Plugin::process`
+// and `isa_v3::nlsc::Plugin::process`, which are distinct symbols. Without it
+// the ODR is violated silently and both routes run the same version.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <new>
 #include <utility>
-#include <vector>
 
-// SYSTEM HEADERS GO UP HERE, OUTSIDE. If one lands inside the ISA
-// namespace, `std::` ends up inside it and nothing compiles. The list comes
-// from a grep over every `src/nls_*.h`; if another appears, the error is
-// immediate and clear.
+// System headers are included here, outside the ISA namespace: included
+// inside it, `std::` would land in the namespace and nothing would compile.
 #if defined(__SSE2__) || defined(__x86_64__)
 #  include <pmmintrin.h>
 #  include <xmmintrin.h>
@@ -34,9 +31,23 @@ namespace NLSC_ISA_NS {
 #include "nls_core.h"
 }
 
+// The object is built inside the ISA namespace, in a function that is not
+// inlined: the constructor carries vector code when this unit is compiled for
+// v3, and it has to stay within the v3 copy's own symbols. The check on the
+// built binary requires every AVX2/FMA instruction to lie inside an `isa_v3`
+// symbol; inlined into the ::nlsc factory, that code would sit outside every
+// clone. It would still be safe at run time, since the factory is only called
+// after `has_v3()`, but it would escape that check.
+namespace NLSC_ISA_NS { namespace nlsc {
+__attribute__((noinline)) ::nlsc::ICore* create()
+{
+    return new (std::nothrow) Plugin();
+}
+} }
+
 namespace nlsc {
 ICore* NLSC_ISA_FACTORY()
 {
-    return new (std::nothrow) NLSC_ISA_NS::nlsc::Plugin();
+    return NLSC_ISA_NS::nlsc::create();
 }
 }

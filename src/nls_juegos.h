@@ -1,33 +1,21 @@
-// nls_juegos.h — EACH VARIANT'S COEFFICIENT BANK, in ONE place.
+// nls_juegos.h — each circuit's coefficient bank, in one place.
 //
-// WHY IT EXISTS
-// -----------------
-// The whole plugin was already N-variant except the cascade:
-// `gen_variantes.sh` generates one bank per row, the DK engine builds its
-// matrices from `kVariants[idx]`, the harnesses take the index, and the GUI
-// and `.ttl` offer whatever the table says. The cascade did NOT: it chose
-// with `if (variant == 1) … else …` in EIGHT places across three files, and
-// every `else` fell through to the 808.
+// Each variant enumerates its symbols once, and the code that uses them is
+// written once (templates), so no `if (variant == …)` can fall through to the
+// wrong circuit. Adding a circuit takes two steps: generate its bank, and
+// add a `struct` here and its name to `Banks`. `Cascade4::prepare` dispatches
+// over `Banks`, so a bank in the list is reachable and a circuit without one
+// does not compile.
 //
-// => Adding a third row to `nls_variantes.h` — which that file explicitly
-// invites — would have made the manifest announce a new circuit while the
-// DEFAULT engine delivered the 808, with not a single error. A silent
-// failure the rest of the system already permits is not hypothetical.
-//
-// HERE each variant enumerates its symbols ONCE, and the code that uses
-// them is written ONCE (templates). Adding a variant is TWO things and both
-// fail at compile time if missing: a `struct` here and a `case` in the one
-// dispatch, in `Cascade4::prepare`.
-//
-// WHY `static constexpr auto&` AND NOT POINTERS: a reference keeps the
-// ARRAY TYPE (`const double (&)[7][1]`), so `ParamFilter::prepare` still
+// Why `static constexpr auto&` and not pointers: a reference keeps the
+// array type (`const double (&)[7][1]`), so `ParamFilter::prepare` still
 // checks at compile time that the table has the rows its template expects.
-// With pointers that check disappears exactly where it hurts most — a
-// wrong-size table raises no error; it becomes a different filter.
+// With a pointer a wrong-size table raises no error; it becomes a different
+// filter.
 //
-// What does NOT belong here, and it is not an oversight:
-//   · `tone::`  — stage 3 does NOT depend on the variant. Measured: in the
-//     full circuit, stages 1-3 move by less than 0,0004 dB when `R13`/`R14`
+// What does not belong here:
+//   · `tone::`  — stage 3 does not depend on the variant: in the full
+//     circuit, stages 1-3 move by less than 0,0004 dB when `R14`/`R15`
 //     change.
 //   · `rest::kOffOutput` — that is `NLSC_OUT_OFF`, a compile constant.
 //   · `kScale` — 2*pi*1000, the same convention in every bank.
@@ -36,43 +24,42 @@
 namespace nlsc {
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  The **OD-8** bank (index 0) — the one that ships, and carries NO suffix.
+//  The OD-8 bank (index 0), whose namespaces carry no suffix.
 // ─────────────────────────────────────────────────────────────────────────────
 struct Bank808 {
     // stage 1 — fixed filters and its waveshaper (Q1)
-    static constexpr auto& H1_B = fijos::kH1_B;   static constexpr auto& H1_A = fijos::kH1_A;
-    static constexpr auto& HS_B = fijos::kHS_B;   static constexpr auto& HS_A = fijos::kHS_A;
-    static constexpr auto& H2_B = fijos::kH2_B;   static constexpr auto& H2_A = fijos::kH2_A;
+    static constexpr auto& H1_B = fixed::kH1_B;   static constexpr auto& H1_A = fixed::kH1_A;
+    static constexpr auto& HS_B = fixed::kHS_B;   static constexpr auto& HS_A = fixed::kHS_A;
+    static constexpr auto& H2_B = fixed::kH2_B;   static constexpr auto& H2_A = fixed::kH2_A;
     static constexpr const double* WS = stage1::kWS;
     static constexpr int    WS_N = stage1::kWS_N;
     static constexpr double Qn3 = stage1::kQn3, Qn6 = stage1::kQn6;
-    // The travel of Q1's waveshaper fit, for its tangent GUARD. Each
+    // The travel of Q1's waveshaper fit, for its tangent guard. Each
     // variant fits its own curve, so each brings its own range.
     static constexpr double WS_UMIN = stage1::kWS_UMIN, WS_UMAX = stage1::kWS_UMAX;
 
     // stage 4 — fixed filters and Q2's waveshaper
-    static constexpr auto& E4GS_B = fijos::kE4GS_B; static constexpr auto& E4GS_A = fijos::kE4GS_A;
-    static constexpr auto& E4G2_B = fijos::kE4G2_B; static constexpr auto& E4G2_A = fijos::kE4G2_A;
+    static constexpr auto& E4GS_B = fixed::kE4GS_B; static constexpr auto& E4GS_A = fixed::kE4GS_A;
+    static constexpr auto& E4G2_B = fixed::kE4G2_B; static constexpr auto& E4G2_A = fixed::kE4G2_A;
     static constexpr const double* WS2 = e234::kWS2;
     static constexpr int    WS2_N = e234::kWS2_N;
     static constexpr double WS2_UMIN = e234::kWS2_UMIN, WS2_UMAX = e234::kWS2_UMAX;
 
     // rail and opamp correction
-    static constexpr auto& N3_B  = fijos::kN3_B;  static constexpr auto& N3_A  = fijos::kN3_A;
-    static constexpr auto& VRA_B = fijos::kVRA_B; static constexpr auto& VRA_A = fijos::kVRA_A;
-    static constexpr auto& VRB_B = fijos::kVRB_B; static constexpr auto& VRB_A = fijos::kVRB_A;
-    static constexpr auto& VRP_B = fijos::kVRP_B; static constexpr auto& VRP_A = fijos::kVRP_A;
-    // `VRC` is the `n19` branch, which used to enter through the CONSTANT
-    // `G_n19`. Measured: its admittance moves 15,7 dB from DC to the top of
-    // the band, because `n19` reaches the rail through `C8` towards the
-    // pot's `n18` as well, not just through `R12`. Its three passive sisters
-    // come out FLAT at 0,0 dB — the control that the census does not flag
-    // everything.
-    static constexpr auto& VRC_B = fijos::kVRC_B; static constexpr auto& VRC_A = fijos::kVRC_A;
-    static constexpr auto& E2C_B = fijos::kE2C_B; static constexpr auto& E2C_A = fijos::kE2C_A;
-    static constexpr double ScaleF = fijos::kScale;
+    static constexpr auto& N3_B  = fixed::kN3_B;  static constexpr auto& N3_A  = fixed::kN3_A;
+    static constexpr auto& VRA_B = fixed::kVRA_B; static constexpr auto& VRA_A = fixed::kVRA_A;
+    static constexpr auto& VRB_B = fixed::kVRB_B; static constexpr auto& VRB_A = fixed::kVRB_A;
+    static constexpr auto& VRP_B = fixed::kVRP_B; static constexpr auto& VRP_A = fixed::kVRP_A;
+    // `VRC` is the `n19` branch as a filter rather than a constant
+    // conductance: its admittance moves 15,7 dB from DC to the top of the
+    // band, because `n19` reaches the rail through `C8` towards the pot's
+    // `n18` as well, not just through `R12`. The other three rail branches
+    // are flat and stay constants.
+    static constexpr auto& VRC_B = fixed::kVRC_B; static constexpr auto& VRC_A = fixed::kVRC_A;
+    static constexpr auto& E2C_B = fixed::kE2C_B; static constexpr auto& E2C_A = fixed::kE2C_A;
+    static constexpr double ScaleF = fixed::kScale;
 
-    // level — the FITTED bank (tabulated path) and the OPEN-BASE one (subsystem)
+    // level — the fitted bank (tabulated path) and the open-base one (subsystem)
     static constexpr auto& nB  = level::kB;   static constexpr auto& nA  = level::kA;
     static constexpr auto& nBr = level::kBr;  static constexpr auto& nAr = level::kAr;
     static constexpr auto& nBo = level::kBo;  static constexpr auto& nAo = level::kAo;
@@ -94,46 +81,44 @@ struct Bank808 {
     static constexpr double G_n3 = e234::kG_n3,  G_n4  = e234::kG_n4;
     static constexpr double G_n11 = e234::kG_n11, G_n19 = e234::kG_n19;
 
-    // What stage 4 needs to SOLVE Q2 instead of tabulating it. Comes from
-    // `nls_variantes.h`, the ONE table the GUI and the `.ttl` also read.
+    // What stage 4 needs to solve Q2 instead of tabulating it. Comes from
+    // `nls_variantes.h`, the one table the GUI and the `.ttl` also read.
     static constexpr int    idx = 0;
-    // HOW Q2 is solved in stage 4: `false` = the tabulated polynomial,
-    // `true` = the scalar-Newton subsystem. It lives HERE, in the bank,
-    // and not in an `(idx == 1) ? … : …` in the engine: that was another
-    // two-way hard-wire, and a third variant would have inherited the 808's
-    // choice in silence.
-    static constexpr bool   use_sub = kSubEn808;
+    // How Q2 is solved in stage 4: `false` = the tabulated polynomial,
+    // `true` = the scalar-Newton subsystem. It lives in the bank, not in an
+    // index comparison in the engine, so each circuit states its own choice.
+    static constexpr bool   use_sub = kSubIn808;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  The **OD-9** bank (index 1)
 // ─────────────────────────────────────────────────────────────────────────────
 struct Bank9ri {
-    static constexpr auto& H1_B = fijos_v9ri::kH1_B;   static constexpr auto& H1_A = fijos_v9ri::kH1_A;
-    static constexpr auto& HS_B = fijos_v9ri::kHS_B;   static constexpr auto& HS_A = fijos_v9ri::kHS_A;
-    static constexpr auto& H2_B = fijos_v9ri::kH2_B;   static constexpr auto& H2_A = fijos_v9ri::kH2_A;
+    static constexpr auto& H1_B = fixed_v9ri::kH1_B;   static constexpr auto& H1_A = fixed_v9ri::kH1_A;
+    static constexpr auto& HS_B = fixed_v9ri::kHS_B;   static constexpr auto& HS_A = fixed_v9ri::kHS_A;
+    static constexpr auto& H2_B = fixed_v9ri::kH2_B;   static constexpr auto& H2_A = fixed_v9ri::kH2_A;
     static constexpr const double* WS = stage1_v9ri::kWS;
     static constexpr int    WS_N = stage1_v9ri::kWS_N;
     static constexpr double Qn3 = stage1_v9ri::kQn3, Qn6 = stage1_v9ri::kQn6;
-    // The travel of Q1's waveshaper fit, for its tangent GUARD. Each
+    // The travel of Q1's waveshaper fit, for its tangent guard. Each
     // variant fits its own curve, so each brings its own range.
     static constexpr double WS_UMIN = stage1_v9ri::kWS_UMIN, WS_UMAX = stage1_v9ri::kWS_UMAX;
 
-    static constexpr auto& E4GS_B = fijos_v9ri::kE4GS_B; static constexpr auto& E4GS_A = fijos_v9ri::kE4GS_A;
-    static constexpr auto& E4G2_B = fijos_v9ri::kE4G2_B; static constexpr auto& E4G2_A = fijos_v9ri::kE4G2_A;
+    static constexpr auto& E4GS_B = fixed_v9ri::kE4GS_B; static constexpr auto& E4GS_A = fixed_v9ri::kE4GS_A;
+    static constexpr auto& E4G2_B = fixed_v9ri::kE4G2_B; static constexpr auto& E4G2_A = fixed_v9ri::kE4G2_A;
     static constexpr const double* WS2 = e234_v9ri::kWS2;
     static constexpr int    WS2_N = e234_v9ri::kWS2_N;
     static constexpr double WS2_UMIN = e234_v9ri::kWS2_UMIN, WS2_UMAX = e234_v9ri::kWS2_UMAX;
 
-    static constexpr auto& N3_B  = fijos_v9ri::kN3_B;  static constexpr auto& N3_A  = fijos_v9ri::kN3_A;
-    static constexpr auto& VRA_B = fijos_v9ri::kVRA_B; static constexpr auto& VRA_A = fijos_v9ri::kVRA_A;
-    static constexpr auto& VRB_B = fijos_v9ri::kVRB_B; static constexpr auto& VRB_A = fijos_v9ri::kVRB_A;
-    static constexpr auto& VRP_B = fijos_v9ri::kVRP_B; static constexpr auto& VRP_A = fijos_v9ri::kVRP_A;
+    static constexpr auto& N3_B  = fixed_v9ri::kN3_B;  static constexpr auto& N3_A  = fixed_v9ri::kN3_A;
+    static constexpr auto& VRA_B = fixed_v9ri::kVRA_B; static constexpr auto& VRA_A = fixed_v9ri::kVRA_A;
+    static constexpr auto& VRB_B = fixed_v9ri::kVRB_B; static constexpr auto& VRB_A = fixed_v9ri::kVRB_A;
+    static constexpr auto& VRP_B = fixed_v9ri::kVRP_B; static constexpr auto& VRP_A = fixed_v9ri::kVRP_A;
     // `VRC` is the `n19` branch — see the 808 bank's note; same mechanism,
     // this variant's own numbers.
-    static constexpr auto& VRC_B = fijos_v9ri::kVRC_B; static constexpr auto& VRC_A = fijos_v9ri::kVRC_A;
-    static constexpr auto& E2C_B = fijos_v9ri::kE2C_B; static constexpr auto& E2C_A = fijos_v9ri::kE2C_A;
-    static constexpr double ScaleF = fijos_v9ri::kScale;
+    static constexpr auto& VRC_B = fixed_v9ri::kVRC_B; static constexpr auto& VRC_A = fixed_v9ri::kVRC_A;
+    static constexpr auto& E2C_B = fixed_v9ri::kE2C_B; static constexpr auto& E2C_A = fixed_v9ri::kE2C_A;
+    static constexpr double ScaleF = fixed_v9ri::kScale;
 
     static constexpr auto& nB  = level_v9ri::kB;   static constexpr auto& nA  = level_v9ri::kA;
     static constexpr auto& nBr = level_v9ri::kBr;  static constexpr auto& nAr = level_v9ri::kAr;
@@ -155,26 +140,32 @@ struct Bank9ri {
     static constexpr double G_n11 = e234_v9ri::kG_n11, G_n19 = e234_v9ri::kG_n19;
 
     static constexpr int    idx = 1;
-    static constexpr bool   use_sub = kSubEnV9ri;
+    static constexpr bool   use_sub = kSubInV9ri;
 };
 
-// THE GATE. Each bank declares ITS index, and here the list is checked
-// against the whole table. Adding a row to `nls_variantes.h` makes this NOT
-// compile — which is exactly the intent: a circuit announced but not
-// delivered is a silent failure, and a silent failure gets turned into a
-// compile error.
-static_assert(Bank808::idx == 0 && Bank9ri::idx == 1,
-              "bank indices must follow the order of kVariants");
-// It counts CIRCUITS, not selector rows. A row that only changes a knob's
-// law (`ToneLaw`) reuses a circuit and needs NO bank, so it must not have to
-// touch this number — bumping it for such a row would disarm the guard for
-// the next row that IS a new circuit. See the two tables in
-// `nls_variantes.h`.
-static_assert(kNumCircuits == 2,
-              "A CIRCUIT'S BANK IS MISSING. To add one: (1) generate its bank with "
-              "`harness/gen_variantes.sh` (one more entry in VARIANTES=), (2) copy a "
-              "`struct Bank…` from this file changing the namespace suffix, "
-              "and (3) add its `case` to the ONE dispatch, in `Cascade4::prepare`. "
-              "⛔ Do not bump this number without doing all three.");
+// The banks, in circuit order. This list is the dispatch: `Cascade4::prepare`
+// walks it, so nothing else names a bank by index.
+template <class... B>
+struct BankList {
+    static constexpr int size = int(sizeof...(B));
+};
+using Banks = BankList<Bank808, Bank9ri>;
+
+// A list covers the circuit table when it has one bank per circuit and each
+// bank's `idx` is its position. It counts circuits, not selector rows: a row
+// that only changes a knob's law (`ToneLaw`) reuses a circuit and needs no
+// bank. See the two tables in `nls_variantes.h`.
+template <class... B>
+constexpr bool banks_cover_circuits(BankList<B...>)
+{
+    int pos = 0;
+    bool in_order = true;
+    ((in_order = in_order && B::idx == pos++), ...);
+    return in_order && int(sizeof...(B)) == kNumCircuits;
+}
+static_assert(banks_cover_circuits(Banks{}),
+              "Banks must hold one bank per circuit of kCircuits, in order. To add a "
+              "circuit: generate its coefficient bank, copy a `struct Bank…` from this "
+              "file changing the namespace suffix and `idx`, and append it to `Banks`.");
 
 } // namespace nlsc
