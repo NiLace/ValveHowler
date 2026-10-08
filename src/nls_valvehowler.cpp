@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // Valve Howler — an overdrive modelled from the circuit.
 //
 // This file is the LV2 scaffolding: descriptor, ports and the one-time choice

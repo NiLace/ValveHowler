@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_filtro_param.h — an IIR whose coefficients are a function of a knob.
 //
 // The machinery shared by `nls_tono.h` (stage 3) and `nls_nivel.h`

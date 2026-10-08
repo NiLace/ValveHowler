@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) The NL Sounds contributors
 # Valve Howler -- a circuit-modelled overdrive for Linux, as an LV2 plugin.
 #
 #   make            plugin + interface

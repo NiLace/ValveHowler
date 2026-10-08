@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_juegos.h — each circuit's coefficient bank, in one place.
 //
 // Each variant enumerates its symbols once, and the code that uses them is

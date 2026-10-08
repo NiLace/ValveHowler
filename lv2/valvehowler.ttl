@@ -20,7 +20,7 @@
 <https://nylarea.com/nlsounds>
     a doap:Project ;
     doap:name "NL Sounds" ;
-    doap:license <http://opensource.org/licenses/gpl-3.0> ;
+    doap:license <https://spdx.org/licenses/AGPL-3.0-only> ;
     doap:maintainer [ a foaf:Person ; foaf:name "NL Sounds" ;
                       foaf:mbox <mailto:nilace@nylarea.com> ] .
 

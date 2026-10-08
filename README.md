@@ -145,7 +145,7 @@ loaded. `make test` checks that the bundle you just built is complete.
 
 - **Font** (`assets/fonts/`) — Doto, © The Doto Project Authors, under the SIL Open
   Font License 1.1 (full text beside it). It stays under the OFL and is not relicensed
-  under the GPL. It travels inside the bundle because the interface draws the variant
+  under the AGPL. It travels inside the bundle because the interface draws the variant
   display with it directly rather than through the system's font configuration.
 - **Interface images** (`gui/photo/`, `assets/images/`) — renders of our own 3D scene
   of the pedal, lit with the `studio_small_08` HDRI from
@@ -165,8 +165,11 @@ but I have not reviewed every line by hand — so please treat it accordingly:
 - **Help is welcome.** If you read code, spot bugs, or want to improve it, review
   and contributions are genuinely appreciated — that's a big part of why it's open.
 
-Released under the **GNU General Public License v3.0 or later** — see
-[`LICENSE`](LICENSE).
+Released under the **GNU Affero General Public License v3.0, that version only** (`AGPL-3.0-only`) — see
+[`LICENSE`](LICENSE). You may use it, study it, modify it and sell it; what nobody may do is close it: any
+version you distribute, or let others use over a network, has to come with its complete source under this same
+licence. The third-party parts listed above keep their own licences. Contributions are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Author
 

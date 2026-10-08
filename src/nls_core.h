@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_core.h — all of the plugin's DSP, separated from the LV2 scaffolding.
 //
 // This core compiles twice — baseline and avx2/fma — in two translation units

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // Stage 2 — gain and clipping (IC1A + D1/D2).
 //
 // DECOUPLING BY THE VIRTUAL GROUND

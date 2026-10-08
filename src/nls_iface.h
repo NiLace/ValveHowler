@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_iface.h — the ABI shared by the LV2 scaffolding and the two cores.
 //
 // This file is never wrapped in an ISA namespace. The DSP core compiles twice

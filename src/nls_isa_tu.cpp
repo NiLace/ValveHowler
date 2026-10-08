@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_isa_tu.cpp — the core, compiled twice with different flags.
 //
 // Built once per instruction set:

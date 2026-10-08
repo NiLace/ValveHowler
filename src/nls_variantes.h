@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_variantes.h — the circuit-variant table. Single source of truth.
 //
 // It lives in its own header because two binaries need it: the DSP

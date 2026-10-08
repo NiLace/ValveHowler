@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_nivel.h — the level network (E4G1 = n19/n14) with the knob as a
 // parameter.
 //

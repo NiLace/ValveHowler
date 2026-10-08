@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // The CASCADE of the four stages: the plugin's audio engine.
 //
 // The DK engine, which solves the ten nonlinear ports together, is a

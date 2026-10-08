@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // The photoreal panel: pre-rendered Blender images composited with Cairo.
 //
 // No X in here, so the preview tool draws exactly what the host shows. The images

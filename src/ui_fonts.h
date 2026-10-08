@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // ui_fonts.h — loads the embedded TTFs into Cairo faces, via FreeType.
 //
 // The panel's lettering is in its images; the one face drawn live is Doto, the

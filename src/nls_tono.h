@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // nls_tono.h — stage 3 (tone) with the knob as a parameter, not a constant.
 //
 // The coefficients come from `nls_tono_coef.h`, which gives them as explicit

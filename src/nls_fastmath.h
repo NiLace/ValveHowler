@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // Fast transcendentals for the solver's hot path.
 //
 // In the DK engine every Newton iteration makes 16 transcendental calls:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // ui_x11.cpp — Valve Howler's X11 LV2 UI.
 //
 // This is the window-and-events layer. All painting lives in `ui_photo.h`

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // Stage 1 solved from the circuit: the Q1 input buffer as a netlist, not a fit.
 //
 //     in --C1--n2--R1--n3--R2--VR          n6--R3--GND

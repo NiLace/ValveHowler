@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // Polyphase oversampler for the nonlinear engine.
 //
 // The circuit distorts, so it generates harmonics above Nyquist; without

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) The NL Sounds contributors
 // The OD-8 circuit's MNA engine: modified nodal analysis + Newton per sample.
 //
 // A port of a 33-unknown prototype that was validated against ngspice: rest
