@@ -8,6 +8,17 @@ numbers.
 
 ---
 
+## 1.4.2 — 2026-10-18
+
+Sessions saved with 1.4.0 load unchanged, and the sound is the same.
+
+- **Closing the interface can no longer crash the host later.** After the editor was
+  closed and the host had unloaded the interface, the host could crash the next time it
+  drew a lot of text of its own. The interface now leaves nothing behind that the host
+  might call.
+
+---
+
 ## 1.4.0 — 2026-09-30
 
 Sessions saved with 1.0.0 load unchanged.

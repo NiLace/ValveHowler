@@ -45,7 +45,7 @@
     # micro version, or minor version zero, indicates that the resource is a
     # development version".
     lv2:minorVersion 4 ;
-    lv2:microVersion 0 ;
+    lv2:microVersion 2 ;
 
     lv2:optionalFeature lv2:hardRTCapable ;
 
