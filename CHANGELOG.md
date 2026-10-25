@@ -8,6 +8,25 @@ numbers.
 
 ---
 
+## 1.4.4 — 2026-10-25
+
+Sessions saved with 1.4.2 load unchanged, and the sound is the same.
+
+- **Closing and reopening the editor can no longer freeze the host.** With two of these
+  editors open, or next to another plugin that watches the same kind of display errors,
+  closing and reopening one could leave the host stuck at full CPU on its next display
+  error. The interface now installs its error guard once and never hands it back.
+- **The host survives the display going away under the editor.** If the window system
+  dropped the editor's connection, the host could be shut down with it. Now only the
+  editor closes. Any number of editors can be open at once without their errors
+  reaching the host.
+- **Less CPU when driven hard.** The second stage's slew limiting is computed more
+  cheaply. The output is unchanged.
+- **The DC jack is drawn properly seated**, nut on its washer and plug pushed home, and
+  the bundle now carries its licence file.
+
+---
+
 ## 1.4.2 — 2026-10-18
 
 Sessions saved with 1.4.0 load unchanged, and the sound is the same.

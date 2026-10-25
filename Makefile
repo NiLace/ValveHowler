@@ -106,14 +106,20 @@ $(BUNDLE)/valvehowler.so: $(SRC)/nls_valvehowler.cpp \
 	@mkdir -p $(BUNDLE)
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -MF $(BUILD)/nls_valvehowler.d $(PRODFP) $(LDFLAGS) -o $@ $< $(BUILD)/isa_base.o $(BUILD)/isa_v3.o $(LDLIBS)
 
+# The UI module is linked -z nodelete: its X error handler stays installed for the
+# life of the process (src/ui_x11.cpp), so a host that dlcloses the module must not
+# unmap it.
+UI_LDFLAGS := $(LDFLAGS) -Wl,-z,nodelete
+
 $(BUNDLE)/valvehowler_ui.so: $(SRC)/ui_x11.cpp $(FLAGSTAMP) | $(BUILD)
 	@mkdir -p $(BUNDLE)
-	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -MF $(BUILD)/ui_x11.d $(GUI_CF) -I$(SRC) $(LDFLAGS) -o $@ $< $(GUI_LIBS)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -MF $(BUILD)/ui_x11.d $(GUI_CF) -I$(SRC) $(UI_LDFLAGS) -o $@ $< $(GUI_LIBS)
 
 gui: $(BUNDLE)/valvehowler_ui.so
 
 bundle: $(BUNDLE)/valvehowler.so $(BUNDLE)/valvehowler_ui.so
 	@cp $(LV2DIR)/manifest.ttl $(LV2DIR)/valvehowler.ttl $(LV2DIR)/valvehowler_ui.ttl $(BUNDLE)/
+	@cp LICENSE $(BUNDLE)/LICENSE
 	@cp $(FONTS:%=assets/fonts/%) $(BUNDLE)/
 	@mkdir -p $(BUNDLE)/photo
 	@cp $(PHOTO:%=gui/photo/%) $(BUNDLE)/photo/

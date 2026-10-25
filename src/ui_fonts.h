@@ -11,8 +11,10 @@
 // Each `cairo_font_face_t` owns a PRIVATE `FT_Library` holding its one `FT_Face`,
 // hung on the face as user data whose destructor is FreeType's own
 // `FT_Done_FreeType`. Cairo keeps faces in a process-wide cache past our destroy,
-// possibly after the host has closed the editor and unloaded this module (built
-// with -fvisibility=hidden, it really unloads); when Cairo finally drops the face,
+// possibly after the host has closed the editor and unloaded this module (the
+// shipped module is linked -z nodelete and stays mapped; a build without it,
+// with -fvisibility=hidden, really unloads, and the fonts must not depend on
+// which); when Cairo finally drops the face,
 // FreeType frees the library and the face, and nothing calls back into this
 // module (ValveHowler#11: with a destructor in the module the host jumped into
 // unmapped code; gate `make ui-unload`).

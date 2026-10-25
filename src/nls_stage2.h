@@ -415,7 +415,7 @@ public:
             const double base = w + kRO * (iF + Ie) * invDd;
             double u = v5, hp = 1.0;
             for (int k = 0; k < kSlewIt; ++k) {
-                const double t  = std::tanh(gm_ * (x - u) * inv_imax_);
+                const double t  = NLSC_TANH(gm_ * (x - u) * inv_imax_);
                 const double v2 = (imax_ * t + s2) * iY2;
                 double v3 = v2, dv3 = -gm_ * (1.0 - t * t) * iY2;
                 if (v2 <= kVeeSat)      { v3 = kVeeSat; dv3 = 0.0; }
@@ -445,6 +445,11 @@ public:
 #else
 #  define NLSC_E2_HOT_CACHE 0
 #endif
+    __attribute__((noinline, cold))
+    double v2_slew(double x, double v5, double s2) const
+    {
+        return imax_ * NLSC_TANH(gm_ * (x - v5) * inv_imax_) + s2;
+    }
     __attribute__((noinline))
     bool solve_hot(double x, double c, double s2, double w_flat,
                    double& w, double& v5
@@ -726,7 +731,7 @@ public:
 #if NLSC_E2_HOIST
 #if NLSC_E2_SLEW
         if (NLSC_E2_SLEW == 1 || slew_on_)
-            v2_ = (imax_ * std::tanh(gm_ * (x - v5) * inv_imax_) + s2) * invY2_;
+            v2_ = v2_slew(x, v5, s2) * invY2_;
         else
             v2_ = (gm_ * (x - v5) + s2) * invY2_;
 #else
@@ -734,7 +739,7 @@ public:
 #endif
 #elif NLSC_E2_SLEW
         if (NLSC_E2_SLEW == 1 || slew_on_)
-            v2_ = (imax_ * std::tanh(gm_ * (x - v5) * inv_imax_) + s2) / Y2;
+            v2_ = v2_slew(x, v5, s2) / Y2;
         else
             v2_ = (gm_ * (x - v5) + s2) / Y2;
 #else
