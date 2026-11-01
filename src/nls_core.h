@@ -52,11 +52,24 @@ using Real = double;
 // The circuit variants live in `nls_variantes.h`, the single source shared
 // by the DSP and the GUI (two distinct .so files).
 
-// The oversampling factor is fixed at 4x; there is no port for it. At 2x the
-// model misses its fidelity target over most of the knob grid and the alias
-// is audible on pinch harmonics; 16x costs about half a core in the worst
-// block for an alias figure 8x already reaches.
-inline constexpr int kOsFactor = 4;
+// The oversampling factor: 2x by default, 4x behind the `hq` port. Measured against the circuit
+// (`docs/measurements/factor_2026-10-25.md`): 2x passes everything played
+// straight into the pedal and saves ~42 % of the engine's CPU; what 4x still
+// buys is the alias of a pinched harmonic. Both paths are built at
+// instantiate() (`Path`), and `hq` switches between them through the dry fade,
+// like a variant. The latency is the same at both factors (the oversampler's
+// taps per phase do not depend on the factor), so the host never re-compensates.
+// 16x costs about half a core in the worst block for an alias figure 8x
+// already reaches.
+// `NLSC_OS_FACTOR_LO` / `_HI` exist for the gate's reference builds only
+// (`tools/hq_check.sh`: both paths at 4x is the 4x product, both at 2x the 2x).
+#ifndef NLSC_OS_FACTOR_LO
+#  define NLSC_OS_FACTOR_LO 2
+#endif
+#ifndef NLSC_OS_FACTOR_HI
+#  define NLSC_OS_FACTOR_HI 4
+#endif
+inline constexpr int kOsFactor[2] = { NLSC_OS_FACTOR_LO, NLSC_OS_FACTOR_HI };   // indexed by `hq`
 
 // Implements `::nlsc::ICore` — see `nls_iface.h`. The leading `::` is
 // required: inside the ISA namespace, `nlsc::ICore` would resolve to
@@ -70,17 +83,28 @@ struct Plugin : ::nlsc::ICore {
 
     double sample_rate = 48000.0;
 
-    // Prepared in instantiate() (it designs its filter there), reset from
-    // run() on a mode change.
-    Oversampler os_;
-    // The cascade's constructor allocates nothing (fixed arrays throughout), so
-    // the object lives inside the plugin and nothing is allocated on the audio
-    // thread.
-    Cascade4    casc_;
+    // One path per factor, both built in instantiate(): the oversampler
+    // designs its filter there, and each cascade only ever runs at its own
+    // rate (`fs * kOsFactor[hq]`), so a switch re-initialises the circuit at
+    // the rate it already had, as a variant change does. The cascade's
+    // constructor allocates nothing (fixed arrays throughout), so both objects
+    // live inside the plugin and nothing is allocated on the audio thread.
+    // Only the path in use runs; the other one stays as it was left.
+    Oversampler os_[2];
+    Cascade4    casc_[2];
+    int         hq_ = 0;                 // the path applied to the engine (0 = 2x, 1 = 4x)
+    Oversampler& os()   { return os_[hq_]; }
+    Cascade4&    cascade() { return casc_[hq_]; }
+#ifdef NLSC_RESTART_PROBE
+    // Test builds only (`harness/hq_switch.cpp`): how many times the circuit
+    // was re-initialised, and the largest wet share of the output at one.
+    long   restarts_ = 0;
+    double restart_mix_max_ = 0.0;
+#endif
 
     // Knob state already applied to the engine.
     double drive_ = -1.0, tone_ = -1.0, lvl_ = -1.0;   // −1 forces the first prepare
-    int    idx_var_ = 0;             // variant applied to the engine (0 = 808)
+    int    idx_var_ = 0;             // variant applied to the engine (0 = OD-8)
     bool   pending_ = true;
     // A MODE change is waiting for the fade to bottom out.
     bool   pending_mode_ = false;
@@ -155,19 +179,22 @@ struct Plugin : ::nlsc::ICore {
     {
         sample_rate = sr;
         knob_a_ = 1.0 - std::exp(-double(kKnobStep) / (kKnobTau * sr));
-        os_.prepare(kOsFactor);
-        // Deferred cache filling is requested here and only here: this object
-        // reaches `Cascade4::prepare()` (through `apply_knobs()`) from inside
-        // `process()`, i.e. the audio thread. Other users of the cascade do not
-        // request it and build the table at once.
-        casc_.defer_fill(true);
+        for (int h = 0; h < 2; ++h) {
+            os_[h].prepare(kOsFactor[h]);
+            // Deferred cache filling is requested here and only here: this object
+            // reaches `Cascade4::prepare()` (through `apply_knobs()`) from inside
+            // `process()`, i.e. the audio thread. Other users of the cascade do not
+            // request it and build the table at once.
+            casc_[h].defer_fill(true);
+        }
         pending_ = true;
         reset();
     }
 
     void reset() override
     {
-        os_.reset();
+        os_[0].reset();
+        os_[1].reset();
         pending_ = true;      // the engine re-prepares on the first run()
         knob_countdown_ = 0;  // the glide's schedule restarts with the instance
         std::memset(dry_, 0, sizeof dry_);
@@ -333,7 +360,7 @@ struct Plugin : ::nlsc::ICore {
         // The law applies to the position and the inversion afterwards: the
         // divider's attenuation is (1 − lvl), so `lvl = 1 − taper(position)`.
         nl.lvl = 1.0 - level;      // linear: 100K B pot (service manual)
-        const double fs_int = sample_rate * double(kOsFactor);
+        const double fs_int = sample_rate * double(kOsFactor[hq_]);
         // The cascade is prepared with the physical parameters (`nl`), not the port
         // positions, so the knob laws are defined in one place. Its fixed filters
         // (`nls_fijos_s.h`) discretise here at the real rate, so any host rate is
@@ -343,8 +370,8 @@ struct Plugin : ::nlsc::ICore {
         // everything resolves in `prepare()`.
         // The gesture is declared before re-tuning: `reinit` tells a set-up or mode
         // change apart from a knob move, which stage 2 cannot know on its own.
-        casc_.table_gesture(!reinit);
-        casc_.prepare(fs_int, nl.gain, nl.tone, nl.lvl,
+        cascade().table_gesture(!reinit);
+        cascade().prepare(fs_int, nl.gain, nl.tone, nl.lvl,
                       kVariants[idx_var].circuit, reinit);
 
         drive_ = drive; tone_ = tone; lvl_ = level;
@@ -354,9 +381,15 @@ struct Plugin : ::nlsc::ICore {
 
     // The dispatch, in one place: the three `process` paths (wet, fading and
     // bypass) call here, so they cannot run different engines.
+    // One instantiation per path (`H` = the `hq` value), so each path's loop is
+    // compiled with its factor and its objects as constants, as the single-factor
+    // build was: with them read at run time the AVX2/FMA clone fused and
+    // vectorised differently and the 4x path left the shipped 4x engine by one
+    // float LSB (`harness/hq_check.py`).
+    template <int H>
     inline double motor(double x)
     {
-        return casc_.process_modelled(x).out;
+        return casc_[H].process_modelled(x).out;
     }
 
     static double read_port(const float* p, double def)
@@ -369,6 +402,28 @@ struct Plugin : ::nlsc::ICore {
         if (!std::isfinite(v)) return 0;
         const int i = int(std::lround(v));
         return (i < 0) ? 0 : (i >= kNumVariants ? kNumVariants - 1 : i);
+    }
+
+    // The `hq` port is a toggle: >= 0.5 is on. A non-finite value is the
+    // default, 2x.
+    static int hq_index(double v)
+    {
+        return (std::isfinite(v) && v >= 0.5) ? 1 : 0;
+    }
+
+    // Re-initialise the circuit with the variant and the factor asked for: the
+    // one place a mode lands (first block, or the bottom of the dry fade). The
+    // factor is switched first, so `apply_knobs` prepares the path that will run.
+    void restart(double drive, double tone, double level, int idx_var, int hq)
+    {
+#ifdef NLSC_RESTART_PROBE
+        ++restarts_;
+        if (!pending_ && mix_ > restart_mix_max_) restart_mix_max_ = mix_;
+#endif
+        hq_ = hq;
+        apply_knobs(drive, tone, level, idx_var, true);
+        knob_land(drive, tone, level);
+        os().reset();
     }
 
     // Real-time contract: no malloc, no exceptions, no locks.
@@ -388,6 +443,8 @@ struct Plugin : ::nlsc::ICore {
         // default the `.ttl` declares: otherwise a host that skips the port
         // runs a different product than the manifest says.
         const int    idx_var = variant_index(read_port(ctl[PORT_VARIANT], 0.0));
+        // Also the `.ttl`'s default: off, 2x.
+        const int    hq      = hq_index(read_port(ctl[PORT_HQ], 0.0));
 
         // Variant changes enter under the fade. A knob re-tunes live and keeps the
         // state; a variant does not: re-tuned live, the bias network would
@@ -397,14 +454,15 @@ struct Plugin : ::nlsc::ICore {
         // re-seeds the new variant's rest point — and the output fades back to wet.
         // A knob does not fade: it glides (a one-pole, `knob_tick`) with the current
         // variant, and lands exactly on the port value.
-        bool mode_change = (idx_var != idx_var_);
+        // The factor is a mode too: a path switch re-initialises the circuit at the
+        // other rate, so it lands under the same fade, together with a variant
+        // change asked for in the same ramp (one restart for both).
+        bool mode_change = (idx_var != idx_var_) || (hq != hq_);
 #if !NLSC_FADE_MODE
         // Verification variant, never in the release build: applies the variant
         // instantly, without the fade.
         if (!pending_ && mode_change) {
-            apply_knobs(drive, tone, level, idx_var, true);
-            knob_land(drive, tone, level);
-            os_.reset();
+            restart(drive, tone, level, idx_var, hq);
             // Clearing the flag keeps the pending-mode path below from adding a fade on
             // top of the instant change.
             mode_change = false;
@@ -412,9 +470,7 @@ struct Plugin : ::nlsc::ICore {
 #endif
         if (pending_) {
             // The first `prepare` does not fade: there is nothing to leave.
-            apply_knobs(drive, tone, level, idx_var, true);
-            knob_land(drive, tone, level);
-            os_.reset();
+            restart(drive, tone, level, idx_var, hq);
             pending_mode_ = false;
         } else {
             // The variant lands when the ramp bottoms out, and at the block boundary:
@@ -425,9 +481,7 @@ struct Plugin : ::nlsc::ICore {
                 // the same circuit is not re-initialised.
                 pending_mode_ = false;     // the ramp turns back up
             } else if (pending_mode_ && mix_ <= 0.0) {
-                apply_knobs(drive, tone, level, idx_var, true);
-                knob_land(drive, tone, level);
-                os_.reset();
+                restart(drive, tone, level, idx_var, hq);
                 pending_mode_ = false;
             } else if (mode_change) {
                 pending_mode_ = true;      // start the ramp down; apply on arrival
@@ -440,15 +494,17 @@ struct Plugin : ::nlsc::ICore {
         // output independent of the host's block size. This per-block call exists
         // only when `NLSC_E4_FILL_PER_SAMPLE=0`.
 #if !NLSC_E4_FILL_PER_SAMPLE
-        casc_.advance_cache();
+        cascade().advance_cache();
 #endif
 
         // The host wants the latency in base-rate samples: the oversampler's
         // taps − 1. Published every block because the taps are
-        // compile-configurable, not because it moves at run time.
-        if (latency_out) *latency_out = float(os_.latency());
+        // compile-configurable, not because it moves at run time. The same at
+        // both factors (`harness/hq_check.py` checks it through the port), so it
+        // does not move with `hq` either.
+        const int lat = os().latency();
+        if (latency_out) *latency_out = float(lat);
 
-        const int N = kOsFactor;
         // The buffer uses the oversampler's precision (`osreal`: double, or float
         // with `NLSC_OS_F32=1`), not the engine's. With float it is the
         // mixed-precision boundary: the FIR works in float and the solver stays
@@ -459,7 +515,6 @@ struct Plugin : ::nlsc::ICore {
         //
         // The dry's delay must equal the latency just published: the taps are a
         // build setting, and a mismatched delay would comb-filter.
-        const int lat = os_.latency();
         const bool active  = read_port(ctl[PORT_ENABLED], 1.0) >= 0.5;
         // A pending mode change ramps down like a bypass: same path, which
         // is why there is no second fade that could diverge.
@@ -476,17 +531,22 @@ struct Plugin : ::nlsc::ICore {
                 knob_countdown_ = kKnobStep;
             }
             const uint32_t len = std::min<uint32_t>(n_samples - done, knob_countdown_);
-            run_span(in + done, out + done, len, N, up, lat, target, step);
+            if (hq_) run_span<1>(in + done, out + done, len, up, lat, target, step);
+            else     run_span<0>(in + done, out + done, len, up, lat, target, step);
             done += len;
             knob_countdown_ -= len;
         }
     }
 
     // One span of the block: the footswitch's three regimes, per sample.
-    void run_span(const float* src, float* dst, uint32_t n_samples, int N,
+    template <int H>
+    void run_span(const float* src, float* dst, uint32_t n_samples,
                   osreal* up, int lat, double target, double step)
     {
-        if (mix_ == target && target == 1.0) {
+        constexpr int N = kOsFactor[H];
+        Oversampler& os = os_[H];
+        double wet_[kKnobStep];          // a span never crosses a multiple of kKnobStep (the caller's split)
+        if (mix_ != target || target == 1.0) {
             // ══ PURE WET PATH ════════════════════════════════════════════
             // Kept separate from the general `mix*y + (1-mix)*dry` with mix = 1, so
             // the wet output is exact by construction rather than by an argument
@@ -501,15 +561,28 @@ struct Plugin : ::nlsc::ICore {
                 const double x = std::isfinite(xin) ? double(xin) : 0.0;
                 dry_[dry_w_] = float(x);
                 dry_w_ = (dry_w_ + 1) & kMask;
-                os_.upsample(x, up);
-                for (int k = 0; k < N; ++k) up[k] = osreal(motor(double(up[k])));
-                const double y = os_.downsample(up);
+                os.upsample(x, up);
+                for (int k = 0; k < N; ++k) up[k] = osreal(motor<H>(double(up[k])));
+                const double y = os.downsample(up);
                 // A non-finite output would propagate down the host's chain. The engine
                 // keeps its previous solution if Newton fails to converge; this is the
                 // last guard.
                 dst[i] = std::isfinite(y) ? float(y) : 0.0f;
+                wet_[i] = std::isfinite(y) ? y : 0.0;
             }
-        } else if (mix_ == target) {
+            // ══ FADING: the mix in a pass of its own, so the engine above is ONE loop for the wet and the fading
+            // paths: two inlined copies of motor<H> were contracted into FMAs differently by the AVX2 clone, and an
+            // undone mode change left the engine a rounding apart for good.
+            if (mix_ != target) {
+                for (uint32_t i = 0; i < n_samples; ++i) {
+                    const double dry_sample = double(dry_[(dry_w_ + kDryRing - n_samples + i - lat) & kMask]);
+                    dst[i] = float(mix_ * wet_[i] + (1.0 - mix_) * dry_sample);
+                    mix_ += (target > mix_) ? step : -step;
+                    if (mix_ > 1.0) mix_ = 1.0;
+                    if (mix_ < 0.0) mix_ = 0.0;
+                }
+            }
+        } else {
             // ══ SETTLED BYPASS ═══════════════════════════════════════════
             // The engine does NOT run: this is the footswitch's CPU saving.
             // Its state stays frozen at the last point, like a real pedal
@@ -521,25 +594,6 @@ struct Plugin : ::nlsc::ICore {
                 dry_[dry_w_] = float(x);
                 dry_w_ = (dry_w_ + 1) & kMask;
                 dst[i] = dry_[(dry_w_ + kDryRing - 1 - lat) & kMask];
-            }
-        } else {
-            // ══ FADING ═══════════════════════════════════════════════════
-            // The engine keeps running while fading, both directions: fading
-            // towards the dry needs the wet being left behind.
-            for (uint32_t i = 0; i < n_samples; ++i) {
-                const float xin = src[i];
-                const double x = std::isfinite(xin) ? double(xin) : 0.0;
-                dry_[dry_w_] = float(x);
-                dry_w_ = (dry_w_ + 1) & kMask;
-                os_.upsample(x, up);
-                for (int k = 0; k < N; ++k) up[k] = osreal(motor(double(up[k])));
-                const double y = os_.downsample(up);
-                const double wet = std::isfinite(y) ? y : 0.0;
-                const double dry_sample = double(dry_[(dry_w_ + kDryRing - 1 - lat) & kMask]);
-                dst[i] = float(mix_ * wet + (1.0 - mix_) * dry_sample);
-                mix_ += (target > mix_) ? step : -step;
-                if (mix_ > 1.0) mix_ = 1.0;
-                if (mix_ < 0.0) mix_ = 0.0;
             }
         }
 

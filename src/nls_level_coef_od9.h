@@ -17,7 +17,7 @@
 #pragma once
 
 namespace nlsc {
-namespace level_v9ri {
+namespace level_od9 {
 
 static constexpr double kScale = 6283.1853071795867;
 static constexpr int kDegreeNum = 3;
@@ -102,5 +102,5 @@ static constexpr double kBz[3][3] = {
     {+0.00000000000000000e+00, +0.00000000000000000e+00, -5.10000000000000000e+05},
 };
 
-} // namespace level_v9ri
+} // namespace level_od9
 } // namespace nlsc

@@ -5,7 +5,8 @@
 // This file is the LV2 scaffolding: descriptor, ports and the one-time choice
 // between the two builds of the engine (generic x86-64, or AVX2/FMA when the
 // CPU has it). The DSP lives in `nls_core.h`, compiled twice by
-// `nls_isa_tu.cpp`. The oversampling factor is fixed at 4x (`kOsFactor`).
+// `nls_isa_tu.cpp`. The oversampling factor is 2x, or 4x with the `hq` port
+// (`kOsFactor` in `nls_core.h`).
 //
 //   - Entry point wrapped in extern "C".
 //   - Precision parametrised by typedef, not hard-wired.

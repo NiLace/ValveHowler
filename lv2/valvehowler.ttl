@@ -37,15 +37,16 @@
     # "All versions of a plugin with a given URI MUST have the same set of
     # mandatory ports with respect to lv2:symbol", so the port symbols are
     # frozen; a renamed symbol makes the host load the default with no error.
-    # The frozen set is these eight: in · out · drive · tone · level ·
-    # latency · enabled · variant (`PORT_COUNT` in `src/nls_iface.h`).
+    # The frozen set is these nine: in · out · drive · tone · level ·
+    # latency · enabled · variant · hq (`PORT_COUNT` in `src/nls_iface.h`);
+    # `hq` was appended after 1.4.2, so no index moved.
     #
     # The public version is 1.2.0: the leading 1 is carried by the URI, and
     # the 2.0 is what these two lines say. Both must be even: "an odd minor or
     # micro version, or minor version zero, indicates that the resource is a
     # development version".
-    lv2:minorVersion 4 ;
-    lv2:microVersion 4 ;
+    lv2:minorVersion 6 ;
+    lv2:microVersion 0 ;
 
     lv2:optionalFeature lv2:hardRTCapable ;
 
@@ -117,7 +118,7 @@
         # Keen's table, the board photo in Wampler's book (p. 255) and the
         # netlist.
         #
-        # Models 9, 9RI and 5 are electrically identical in this model
+        # The OD-9 row stands for three boxes that are electrically identical in this model
         # (only the opamp would separate them, and there is no macromodel
         # for it), so they share one circuit.
         #
@@ -134,7 +135,7 @@
         # file cannot include the header, so both must be edited together.
         lv2:scalePoint [ rdfs:label "OD-8 W Tone" ; rdf:value 0 ] ;
         lv2:scalePoint [ rdfs:label "OD-9 W Tone"        ; rdf:value 1 ] ;
-        # Not a new circuit: the 808's, with the tone knob's travel
+        # Not a new circuit: the OD-8's, with the tone knob's travel
         # redistributed so the dB come out even across the sweep. The circuit
         # concentrates its tone effect in the pot's last quarter (the last
         # tenth carries 67,2 % of the range) and the real G taper aggravates
@@ -147,4 +148,12 @@
         # tone stage does not depend on the variant.
         lv2:scalePoint [ rdfs:label "OD-9 L Tone" ; rdf:value 3 ]
 
+    ] , [
+        # Appended after 1.4.2 (ValveHowler#20): a new port goes at the end,
+        # so no saved session moves to another index.
+        a lv2:ControlPort, lv2:InputPort ;
+        lv2:index 8 ; lv2:symbol "hq" ; lv2:name "HQ" ;
+        rdfs:comment "High quality: oversamples the circuit 4x instead of 2x. Off, the pedal uses less CPU and sounds the same played straight; on, a pinched harmonic or a very hot input aliases less. The switch fades through the dry signal, like a variant change, and the latency does not change." ;
+        lv2:portProperty lv2:toggled ;
+        lv2:default 0 ; lv2:minimum 0 ; lv2:maximum 1
     ] .

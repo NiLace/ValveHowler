@@ -16,7 +16,7 @@
 #pragma once
 
 namespace nlsc {
-namespace rest_v9ri {
+namespace rest_od9 {
 
 // Coefficients in descending order, as np.polyval.
 // vr: from 4.493294 to 4.495215 V (+1.921 mV), fit ±0.49 uV
@@ -63,5 +63,5 @@ inline double ev(const double (&c)[4], double g)
 #endif
 static constexpr double kOffOutput = NLSC_OUT_OFF;
 
-} // namespace rest_v9ri
+} // namespace rest_od9
 } // namespace nlsc

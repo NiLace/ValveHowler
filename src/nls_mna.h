@@ -45,9 +45,6 @@
 #ifndef NLSC_FAST_EXP
 #define NLSC_FAST_EXP 1
 #endif
-#ifndef NLSC_FAST_POW
-#define NLSC_FAST_POW 0
-#endif
 #ifndef NLSC_FAST_TANH
 #define NLSC_FAST_TANH 1
 #endif
@@ -56,19 +53,7 @@
 #else
 #  define NLSC_EXP(x)      std::exp(x)
 #endif
-#if NLSC_FAST_POW
-#  define NLSC_POWNEG(u,m) nlsc::fast::pow_neg((u), (m))
-#else
 #  define NLSC_POWNEG(u,m) std::pow((u), -(m))
-#endif
-// u^(−m) by range reduction + exponent table (`Junc::powneg`). It needs the
-// `Junc` (its fitted coefficients live inside), so it has its own macro. It
-// is faster than `std::pow` (−13.5 % of clock on the engine) with no
-// measurable change in output quality. `-DNLSC_POW_RANGE=0` returns to
-// `std::pow`.
-#ifndef NLSC_POW_RANGE
-#define NLSC_POW_RANGE 1
-#endif
 
 // `NLSC_BJT_DIV` selects how `bjt()` divides by `qb`: 1 (the default) keeps
 // the three divisions, 0 uses one reciprocal. The reciprocal is not faster in
@@ -84,11 +69,7 @@
 #ifndef NLSC_JUNC_LIN
 #define NLSC_JUNC_LIN 1
 #endif
-#if NLSC_POW_RANGE
 #  define NLSC_JPOWNEG(j,u) (j).powneg(u)
-#else
-#  define NLSC_JPOWNEG(j,u) NLSC_POWNEG((u), (j).m)
-#endif
 #if NLSC_FAST_TANH
 #  define NLSC_TANH(x)     nlsc::fast::tanh_(x)
 #else
@@ -254,11 +235,11 @@ struct Netlist {
     // (`nls_dk_elim_gen.h`) remain valid.
     //
     // Three independent sources agree on it: a published variant table, a
-    // pedal-modification book that marks them on a photo of the board (`808-1` =
-    // 100 Ω and `808-2` = 10 kΩ, p. 255), and the netlist itself, which carries
-    // the factory 808. The table's third circuit (an extra R at position `RA`)
+    // pedal-modification book that marks them on a photo of the board (`OD-8-1` =
+    // 100 Ω and `OD-8-2` = 10 kΩ, p. 255), and the netlist itself, which carries
+    // the factory OD-8. The table's third circuit (an extra R at position `RA`)
     // needs a new element and its value is disputed between sources (1 kΩ or
-    // 220 Ω), so it is not exposed. The defaults are the 808's.
+    // 220 Ω), so it is not exposed. The defaults are the OD-8's.
     double rout_ser = 100.0, rout_shunt = 10e3;
 
     // The parasitics are added in `buildConstant()` and in
@@ -383,129 +364,10 @@ struct Netlist {
 //
 // No pivoting: validated against the dense LU (`lu_solve`), which it
 // matches on this matrix.
-struct SparseLU;
-class Engine;
-
-struct SparseLU {
-    // for each row k: columns < k to eliminate against, and columns >= k
-    // that get touched
-    int8_t nz[N][N];          // structural pattern (fill-in included)
-    int    above[N][N], nabove[N];
-    int    below[N][N], nbelow[N];
-    int    perm[N];           // elimination order
-    int    pat_i[512], pat_j[512], npat = 0;   // the nonzeros, for copying
-
-    // The elimination order decides the fill-in, and here it decides a
-    // lot: natural order takes 117 nonzeros to 360, minimum degree
-    // leaves them at 133 — practically fill-free. A 2.7x factor of work per
-    // solve, for free, computed once in `prepare()`.
-    void minDegree(const int8_t P[N][N])
-    {
-        // On the stack, not `static`: a static array would be shared by every
-        // instance. N is small and this runs once in `prepare()`.
-        bool G[N][N];
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < N; ++j) G[i][j] = P[i][j] || P[j][i];
-        bool outside[N] = {false};
-        for (int s = 0; s < N; ++s) {
-            int best = -1, gmin = 1 << 30;
-            for (int i = 0; i < N; ++i) {
-                if (outside[i]) continue;
-                int g = 0;
-                for (int j = 0; j < N; ++j) if (!outside[j] && j != i && G[i][j]) ++g;
-                if (g < gmin) { gmin = g; best = i; }
-            }
-            perm[s] = best;
-            outside[best] = true;
-            // eliminating a node connects its neighbours to each other
-            for (int a = 0; a < N; ++a) {
-                if (outside[a] || !G[best][a]) continue;
-                for (int b = 0; b < N; ++b)
-                    if (!outside[b] && b != a && G[best][b]) G[a][b] = G[b][a] = true;
-            }
-        }
-    }
-
-    void symbolic(const int8_t P[N][N])
-    {
-        minDegree(P);
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < N; ++j) nz[i][j] = P[perm[i]][perm[j]];
-        // symbolic elimination: row i inherits row k's pattern
-        for (int k = 0; k < N; ++k)
-            for (int i = k + 1; i < N; ++i)
-                if (nz[i][k])
-                    for (int j = k + 1; j < N; ++j)
-                        if (nz[k][j]) nz[i][j] = 1;
-        npat = 0;
-        for (int i = 0; i < N; ++i) {
-            nabove[i] = nbelow[i] = 0;
-            for (int j = i; j < N; ++j) if (nz[i][j]) above[i][nabove[i]++] = j;
-            for (int j = 0; j < N; ++j)
-                if (nz[i][j]) { pat_i[npat] = i; pat_j[npat] = j; ++npat; }
-        }
-        // by columns: which rows to eliminate at step k. Scanning the N-k
-        // rows for `nz[i][k]` costs N²/2 branches per solve, which at this
-        // matrix size outweighs the arithmetic.
-        for (int k = 0; k < N; ++k) {
-            nbelow[k] = 0;
-            for (int i = k + 1; i < N; ++i) if (nz[i][k]) below[k][nbelow[k]++] = i;
-        }
-    }
-
-    int nnz() const
-    {
-        int c = 0;
-        for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j) c += nz[i][j];
-        return c;
-    }
-
-    // In-place Doolittle, walking only the pattern, on the permuted matrix.
-    // Only the nonzeros are copied (133 of 1089), so permuting costs
-    // nothing: a dense copy would have eaten the gain.
-    bool solve(const double Asrc[N][N], const double bsrc[N], double out[N]) const
-    {
-        // On the stack, NOT `static thread_local`: every thread-local
-        // access goes through a TLS resolution, and in a loop running
-        // 384 000 times per second that outweighs the arithmetic itself.
-        double A[N][N], b[N], xp[N];
-        for (int t = 0; t < npat; ++t)
-            A[pat_i[t]][pat_j[t]] = Asrc[perm[pat_i[t]]][perm[pat_j[t]]];
-        for (int i = 0; i < N; ++i) b[i] = bsrc[perm[i]];
-        for (int k = 0; k < N; ++k) {
-            const double d = A[k][k];
-            if (d == 0.0) return false;
-            const double inv = 1.0 / d;
-            for (int t2 = 0; t2 < nbelow[k]; ++t2) {
-                const int i = below[k][t2];
-                const double f = A[i][k] * inv;
-                if (f == 0.0) continue;
-                A[i][k] = 0.0;
-                const int* col = above[k];
-                for (int t = 1; t < nabove[k]; ++t) {   // t=0 is the diagonal
-                    const int j = col[t];
-                    A[i][j] -= f * A[k][j];
-                }
-                b[i] -= f * b[k];
-            }
-        }
-        for (int i = N - 1; i >= 0; --i) {
-            double s = b[i];
-            const int* col = above[i];
-            for (int t = 1; t < nabove[i]; ++t) s -= A[i][col[t]] * xp[col[t]];
-            xp[i] = s / A[i][i];
-        }
-        for (int i = 0; i < N; ++i) out[perm[i]] = xp[i];
-        return true;
-    }
-};
-
-
 // ---------------------------------------------------------------------------
-// Engine
+// Device models: the junction, transistor and diode laws the cascade evaluates.
 // ---------------------------------------------------------------------------
-class Engine {
-public:
+struct Devices {
     // One junction's constants. `f1`, `f2` and `f3` depend only on FC and M, so
     // they are computed once.
     struct Junc {
@@ -593,87 +455,9 @@ public:
             f1 = vj / (1 - m) * (1 - std::pow(1 - fc, 1 - m));
             f2 = std::pow(1 - fc, 1 + m);  inv_f2 = 1.0 / f2;
             f3 = 1 - fc * (1 + m);
-#if NLSC_POW_RANGE
             tune_powneg();
-#endif
         }
     };
-
-    void prepare(double fs_oversampled, const Netlist& nl)
-    {
-        h_ = 1.0 / fs_oversampled;
-        nl_ = nl;
-        nl_.build();
-        vcritQ_ = VT * std::log(VT / (std::sqrt(2.0) * q_.IS));
-        nvtD_   = d_.N * VT;
-        vcritD_ = nvtD_ * std::log(nvtD_ / (std::sqrt(2.0) * d_.IS));
-        q_.derive(); d_.derive(); o_.derive();
-        jbe_.init(q_.CJE, q_.VJE, q_.MJE, q_.FC);
-        jbc_.init(q_.CJC, q_.VJC, q_.MJC, q_.FC);
-        jd_ .init(d_.CJO, d_.VJ,  d_.M,   d_.FC);
-        g2h_ = 2.0 / h_;
-        gm_ = o_.gm();
-        inv_imax_ = 1.0 / o_.imax();
-        // The pattern is cleared before the constant part is built: `assemble`
-        // starts from a copy of the constant matrix, so entries cleared afterwards
-        // would never be re-marked and the solve would hit a null pivot.
-        std::memset(pat_, 0, sizeof pat_);
-        buildConstant();
-        // The pattern is collected from real assemblies, marking every entry
-        // touched. Several run under different conditions — including the opamps
-        // clipping against the rails, which changes the structure — so the pattern
-        // is the union of everything possible.
-        for (int i = 0; i < N; ++i) x_[i] = 4.4;
-        assemble(true);
-        assemble(false);
-        for (int i = 0; i < N; ++i) x_[i] = 0.5;    // opamps against the low rail
-        assemble(true);
-        for (int i = 0; i < N; ++i) x_[i] = 8.5;    // and against the high one
-        assemble(true);
-        slu_.symbolic(pat_);
-        solveDc();
-        capInit();
-    }
-
-    // Returns the output; `iters` receives the iterations consumed.
-    double process(double vin, int* iters = nullptr)
-    {
-        const int k = step(vin);
-        if (iters) *iters = k;
-        return x_[N_out];
-    }
-
-    double node(int n) const { return x_[n]; }
-
-public:
-    // The device physics is public and static on purpose: the DK engine
-    // (`nls_dk.h`) reuses it, so the equations exist once.
-private:
-    // -- node-voltage access, resolving the fixed ones ----------------------
-    double nv(int n) const
-    {
-        if (n >= 0) return x_[n];
-        if (n == N_GND) return 0.0;
-        if (n == N_VCC) return VCC;
-        return vin_;                       // N_IN
-    }
-    void add(int n, double val)          { if (n >= 0) F_[n] += val; }
-    // `pat_` marks every entry touched, whatever its value. The sparsity
-    // pattern cannot come from the nonzeros of one concrete matrix: some
-    // entries are exactly zero at a working point through underflow — the
-    // base-collector junction sits at −5.7 V and `exp(−220)` is 0 in
-    // `double` — yet exist structurally.
-    void jac(int r, int c, double val)
-    {
-        if (r >= 0 && c >= 0) { J_[r][c] += val; pat_[r][c] = 1; }
-    }
-
-    void stampR(int a, int b, double r)
-    {
-        const double g = 1.0 / r, i = (nv(a) - nv(b)) * g;
-        add(a, i);  jac(a, a, g);  jac(a, b, -g);
-        add(b, -i); jac(b, a, -g); jac(b, b, g);
-    }
 
     // -- devices ------------------------------------------------------------
     // `exp(x) − 1` instead of `expm1(x)`: the exponential is needed anyway, and
@@ -683,7 +467,6 @@ private:
     // sits at −220 in VT units).
     static double fexp(double x) { return (x < -50.0) ? 0.0 : NLSC_EXP(x); }
 
-public:
     struct QOut {
         double ib, ic, dib_be, dib_bc, dic_be, dic_bc;
         double qbe, cbe, qbc, cbc;
@@ -880,325 +663,8 @@ public:
         }
         return vnew;
     }
-
-private:
-    void buildConstant();
-    void assemble(bool transient);
-    int  step(double vin);
-    void solveDc();
-    void capInit();
-    void capUpdate();
-
-    // state
-    Netlist nl_{};
-    QModel  q_{};
-    DModel  d_{};
-    OModel  o_{};
-    double  h_ = 1.0 / 384000.0, vin_ = 0.0;
-    double  vcritQ_ = 0, vcritD_ = 0, nvtD_ = 0;
-    double  x_[N] = {0};
-    double  F_[N] = {0};
-    double  J_[N][N] = {{0}};
-    double  Jc_[N][N] = {{0}};                 // linear part, constant
-    int8_t  pat_[N][N] = {{0}};                // structural pattern
-    double  gcap_[12] = {0};
-    double  g2h_ = 0.0;          // 2/h, appearing in every companion model
-    double  gm_ = 0.0, inv_imax_ = 0.0;
-    SparseLU slu_{};
-    double  cv_[12] = {0}, ci_[12] = {0};      // capacitors
-    double  dq_[2] = {0}, di_[2] = {0};        // diodes
-    double  qbe_[2] = {0}, ibe_[2] = {0}, qbc_[2] = {0}, ibc_[2] = {0};  // BJT
 };
 
-
-// ---------------------------------------------------------------------------
-// Instance tables of the nonlinear devices
-// ---------------------------------------------------------------------------
-struct QInst { int b, bi, c, ci, e; };
-struct DInst { int a, ai, k; };
-struct OInst { int p, n, o, i2; };
-
-inline constexpr QInst kQ[2] = {
-    {N_n3,  N_Q1bi, N_VCC, N_Q1ci, N_n6},
-    {N_n19, N_Q2bi, N_VCC, N_Q2ci, N_n17},
-};
-inline constexpr DInst kD[2] = {
-    {N_n5, N_D1ai, N_n7},
-    {N_n7, N_D2ai, N_n5},
-};
-inline constexpr OInst kO[2] = {
-    {N_n4, N_n5,  N_n7,  N_A2},
-    {N_n9, N_n10, N_n14, N_B2},
-};
-
-// The Jacobian's linear part never changes: not between iterations nor
-// between samples (while no knob or step moves). Built once, each iteration
-// starts from a copy. Saves walking 25 resistors with their divisions and
-// branches — nearly half the assembly cost.
-inline void Engine::buildConstant()
-{
-    // The devices' parasitic resistors (RB, RC, RS, RIN, RCM, Rp, Ro) go on
-    // the same list as the netlist's, so each contributes to both the Jacobian
-    // and the residual.
-    for (int i = 0; i < 2; ++i) {
-        auto R = [&](int a, int b, double r) {
-            if (nl_.nres >= Netlist::kMaxRes) { nl_.overflowed = true; return; }
-            nl_.res[nl_.nres++] = {a, b, r};
-        };
-        // `NLSC_MNA_RB=0` removes the base resistance of both transistors; the
-        // default (1) includes it.
-        R(kQ[i].b, kQ[i].bi, (NLSC_MNA_RB) ? q_.RB : 1e-9);
-        R(kQ[i].c, kQ[i].ci, q_.RC);
-        R(kD[i].a, kD[i].ai, d_.RS);
-        R(kO[i].p, kO[i].n, o_.RIN);
-        R(kO[i].p, N_GND, o_.RCM);
-        R(kO[i].n, N_GND, o_.RCM);
-        R(kO[i].i2, N_GND, o_.rp());
-    }
-    std::memset(F_, 0, sizeof F_);
-    std::memset(J_, 0, sizeof J_);
-    for (int i = 0; i < nl_.nres; ++i)
-        stampR(nl_.res[i].a, nl_.res[i].b, nl_.res[i].r);
-    for (int i = 0; i < nl_.ncap; ++i) {
-        const Cap& c = nl_.cap[i];
-        const double g = 2.0 * c.c / h_;
-        jac(c.a, c.a, g); jac(c.a, c.b, -g);
-        jac(c.b, c.a, -g); jac(c.b, c.b, g);
-        gcap_[i] = g;
-    }
-    // Ro: between the opamp's output (known voltage) and the output node.
-    // Only its conductance is constant; the V(2)-dependent part goes in
-    // `assemble` because clipping nulls it outside the linear region.
-    for (int i = 0; i < 2; ++i) jac(kO[i].o, kO[i].o, 1.0 / o_.RO);
-    std::memcpy(Jc_, J_, sizeof J_);
-}
-
-inline void Engine::assemble(bool transient)
-{
-    std::memset(F_, 0, sizeof F_);
-    std::memcpy(J_, Jc_, sizeof J_);
-
-    for (int i = 0; i < nl_.nres; ++i) {
-        const Res& r = nl_.res[i];
-        const double cur = (nv(r.a) - nv(r.b)) / r.r;
-        add(r.a, cur); add(r.b, -cur);
-    }
-
-    if (transient) {
-        for (int i = 0; i < nl_.ncap; ++i) {
-            const Cap& c = nl_.cap[i];
-            const double cur = gcap_[i] * ((nv(c.a) - nv(c.b)) - cv_[i]) - ci_[i];
-            add(c.a, cur); add(c.b, -cur);
-        }
-    } else {
-        // at DC the capacitors do not conduct: their conductance is removed
-        for (int i = 0; i < nl_.ncap; ++i) {
-            const Cap& c = nl_.cap[i];
-            jac(c.a, c.a, -gcap_[i]); jac(c.a, c.b, gcap_[i]);
-            jac(c.b, c.a, gcap_[i]);  jac(c.b, c.b, -gcap_[i]);
-        }
-    }
-
-    for (int i = 0; i < 2; ++i) {
-        const QInst& q = kQ[i];
-        const double vbe = nv(q.bi) - nv(q.e), vbc = nv(q.bi) - nv(q.ci);
-        QOut o = bjt(q_, jbe_, jbc_, vbe, vbc, transient);
-        if (transient) {
-            const double ibe = g2h_ * (o.qbe - qbe_[i]) - ibe_[i];
-            const double ibc = g2h_ * (o.qbc - qbc_[i]) - ibc_[i];
-            o.ib += ibe + ibc;
-            o.dib_be += g2h_ * o.cbe;
-            o.dib_bc += g2h_ * o.cbc;
-            o.ic -= ibc;
-            o.dic_bc -= g2h_ * o.cbc;
-        }
-        add(q.bi, o.ib);
-        jac(q.bi, q.bi, o.dib_be + o.dib_bc); jac(q.bi, q.e, -o.dib_be); jac(q.bi, q.ci, -o.dib_bc);
-        add(q.ci, o.ic);
-        jac(q.ci, q.bi, o.dic_be + o.dic_bc); jac(q.ci, q.e, -o.dic_be); jac(q.ci, q.ci, -o.dic_bc);
-        add(q.e, -(o.ib + o.ic));
-        jac(q.e, q.bi, -(o.dib_be + o.dib_bc + o.dic_be + o.dic_bc));
-        jac(q.e, q.e, o.dib_be + o.dic_be);
-        jac(q.e, q.ci, o.dib_bc + o.dic_bc);
-    }
-
-    for (int i = 0; i < 2; ++i) {
-        const DInst& dd = kD[i];
-        const double vd = nv(dd.ai) - nv(dd.k);
-        const DOut dv = diode(d_, jd_, vd, transient);
-        double cur = dv.i, g = dv.g;
-        if (transient) {
-            cur += g2h_ * (dv.q - dq_[i]) - di_[i];
-            g   += g2h_ * dv.c;
-        }
-        add(dd.ai, cur);  jac(dd.ai, dd.ai, g);  jac(dd.ai, dd.k, -g);
-        add(dd.k, -cur);  jac(dd.k, dd.ai, -g);  jac(dd.k, dd.k, g);
-    }
-
-    for (int i = 0; i < 2; ++i) {
-        const OInst& oa = kO[i];
-        // current-limited transconductance = the slew mechanism.
-        // `Bgm 0 2` injects current INTO internal node 2.
-        const double vd = nv(oa.p) - nv(oa.n);
-        // sech²(x) = 1 − tanh²(x): the derivative falls out of the tanh
-        // itself and the `cosh` is redundant. Two fewer calls per assembly,
-        // exact.
-        const double arg = gm_ * vd * inv_imax_;
-        const double t = NLSC_TANH(arg);
-        const double ign = o_.imax() * t;
-        const double dign = gm_ * (1.0 - t * t);
-        add(oa.i2, -ign);  jac(oa.i2, oa.p, -dign); jac(oa.i2, oa.n, dign);
-        // Output: V = clip(V(2)), then Ro to the output node. The clip is a hard
-        // switch.
-        const double v2 = nv(oa.i2);
-        const double lo = o_.VSAT, hi = VCC - o_.VSAT;
-        double vt_, dvo;
-        if (v2 < lo)      { vt_ = lo; dvo = 0.0; }
-        else if (v2 > hi) { vt_ = hi; dvo = 0.0; }
-        else              { vt_ = v2; dvo = 1.0; }
-        const double gro = 1.0 / o_.RO;
-        add(oa.o, (nv(oa.o) - vt_) * gro);
-        jac(oa.o, oa.i2, -dvo * gro);
-    }
-}
-
-// Dense LU with partial pivoting. Kept as the reference to validate the
-// sparse one against, not for production.
-inline bool lu_solve(double A[N][N], double b[N], double out[N])
-{
-    for (int k = 0; k < N; ++k) {
-        int p = k; double mx = std::fabs(A[k][k]);
-        for (int i = k + 1; i < N; ++i) {
-            const double v = std::fabs(A[i][k]);
-            if (v > mx) { mx = v; p = i; }
-        }
-        if (mx == 0.0) return false;
-        if (p != k) {
-            for (int j = 0; j < N; ++j) { const double t = A[k][j]; A[k][j] = A[p][j]; A[p][j] = t; }
-            const double t = b[k]; b[k] = b[p]; b[p] = t;
-        }
-        const double inv = 1.0 / A[k][k];
-        for (int i = k + 1; i < N; ++i) {
-            const double f = A[i][k] * inv;
-            if (f == 0.0) continue;
-            A[i][k] = 0.0;
-            for (int j = k + 1; j < N; ++j) A[i][j] -= f * A[k][j];
-            b[i] -= f * b[k];
-        }
-    }
-    for (int i = N - 1; i >= 0; --i) {
-        double s = b[i];
-        for (int j = i + 1; j < N; ++j) s -= A[i][j] * out[j];
-        out[i] = s / A[i][i];
-    }
-    return true;
-}
-
-inline void Engine::capInit()
-{
-    for (int i = 0; i < nl_.ncap; ++i) {
-        cv_[i] = nv(nl_.cap[i].a) - nv(nl_.cap[i].b);
-        ci_[i] = 0.0;
-    }
-    for (int i = 0; i < 2; ++i) {
-        dq_[i] = diode(d_, jd_, nv(kD[i].ai) - nv(kD[i].k), true).q;
-        di_[i] = 0.0;
-        const QOut o = bjt(q_, jbe_, jbc_, nv(kQ[i].bi) - nv(kQ[i].e),
-                           nv(kQ[i].bi) - nv(kQ[i].ci), true);
-        qbe_[i] = o.qbe; qbc_[i] = o.qbc;
-        ibe_[i] = ibc_[i] = 0.0;
-    }
-}
-
-inline void Engine::capUpdate()
-{
-    for (int i = 0; i < nl_.ncap; ++i) {
-        const double vc = nv(nl_.cap[i].a) - nv(nl_.cap[i].b);
-        ci_[i] = (2.0 * nl_.cap[i].c / h_) * (vc - cv_[i]) - ci_[i];
-        cv_[i] = vc;
-    }
-    for (int i = 0; i < 2; ++i) {
-        const double qq = diode(d_, jd_, nv(kD[i].ai) - nv(kD[i].k), true).q;
-        di_[i] = g2h_ * (qq - dq_[i]) - di_[i];
-        dq_[i] = qq;
-        const QOut o = bjt(q_, jbe_, jbc_, nv(kQ[i].bi) - nv(kQ[i].e),
-                           nv(kQ[i].bi) - nv(kQ[i].ci), true);
-        ibe_[i] = g2h_ * (o.qbe - qbe_[i]) - ibe_[i];
-        ibc_[i] = g2h_ * (o.qbc - qbc_[i]) - ibc_[i];
-        qbe_[i] = o.qbe; qbc_[i] = o.qbc;
-    }
-}
-
-// Limits the junctions and rebuilds the nodes from them. Limiting the nodes
-// separately does not bound the junctions, which are their differences.
-inline void limit_junctions(double* xn, const double* xo,
-                            double vt, double vcritQ, double nvtD, double vcritD)
-{
-    for (int i = 0; i < 2; ++i) {
-        const int b = kQ[i].bi, e = kQ[i].e;
-        const double v = Engine::pnjlim(xn[b] - xn[e], xo[b] - xo[e], vt, vcritQ);
-        xn[e] = xn[b] - v;
-    }
-    for (int i = 0; i < 2; ++i) {
-        const int a = kD[i].ai, k = kD[i].k;
-        const double v = Engine::pnjlim(xn[a] - xn[k], xo[a] - xo[k], nvtD, vcritD);
-        xn[k] = xn[a] - v;
-    }
-}
-
-inline int Engine::step(double vin)
-{
-    vin_ = vin;
-    double xo[N];
-    std::memcpy(xo, x_, sizeof x_);
-    int k = 0;
-    for (; k < 30; ++k) {
-        assemble(true);
-        double rhs[N], dx[N];
-        for (int i = 0; i < N; ++i) rhs[i] = -F_[i];
-        if (!slu_.solve(J_, rhs, dx)) break;
-        double mx = 0.0;
-        for (int i = 0; i < N; ++i) mx = std::fmax(mx, std::fabs(dx[i]));
-        // Criterion on the step, not the current residual. With discretised
-        // capacitors the companion conductance is 2C/h — for C9 = 10 µF at
-        // 384 kHz that is 7.68 S, i.e. currents in amperes — and an absolute
-        // current threshold would be 1e-16 relative: Newton would never converge.
-        for (int i = 0; i < N; ++i) x_[i] += dx[i];
-        if (mx < 1e-9) { ++k; break; }
-        double xn[N];
-        std::memcpy(xn, x_, sizeof x_);
-        limit_junctions(xn, xo, VT, vcritQ_, nvtD_, vcritD_);
-        std::memcpy(x_, xn, sizeof x_);
-        std::memcpy(xo, x_, sizeof x_);
-    }
-    capUpdate();
-    return k;
-}
-
-inline void Engine::solveDc()
-{
-    vin_ = 0.0;
-    for (int i = 0; i < N; ++i) x_[i] = 4.4;
-    x_[N_n3] = x_[N_n19] = x_[N_n2] = x_[N_Q1bi] = x_[N_Q2bi] = 3.3;
-    x_[N_Q1ci] = x_[N_Q2ci] = VCC;
-    x_[N_n6] = x_[N_n17] = x_[N_n20] = 2.7;
-    x_[N_n12] = x_[N_out] = 0.0;
-    double xo[N];
-    for (int k = 0; k < 300; ++k) {
-        std::memcpy(xo, x_, sizeof x_);
-        assemble(false);
-        double rhs[N], dx[N];
-        for (int i = 0; i < N; ++i) rhs[i] = -F_[i];
-        if (!slu_.solve(J_, rhs, dx)) break;
-        double mx = 0.0;
-        for (int i = 0; i < N; ++i) { x_[i] += dx[i]; mx = std::fmax(mx, std::fabs(dx[i])); }
-        if (mx < 1e-12) break;
-        double xn[N];
-        std::memcpy(xn, x_, sizeof x_);
-        limit_junctions(xn, xo, VT, vcritQ_, nvtD_, vcritD_);
-        std::memcpy(x_, xn, sizeof x_);
-    }
-}
 
 } // namespace mna
 } // namespace nlsc

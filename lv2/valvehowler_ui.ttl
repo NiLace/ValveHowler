@@ -30,8 +30,8 @@
                         urid:map ;
     opts:supportedOption ui:scaleFactor ;
 
-    # Which ports the UI subscribes to: the five it draws or edits (the
-    # three knobs, the footswitch and the variant). `latency` is not
+    # Which ports the UI subscribes to: the six it draws or edits (the
+    # three knobs, the footswitch, the variant and HQ). `latency` is not
     # drawn, and subscribing to it would wake the UI for nothing.
     ui:portNotification [
         ui:plugin <https://nylarea.com/plugins/valvehowler> ;
@@ -52,5 +52,9 @@
     ] , [
         ui:plugin <https://nylarea.com/plugins/valvehowler> ;
         lv2:symbol "variant" ;
+        ui:protocol ui:floatProtocol
+    ] , [
+        ui:plugin <https://nylarea.com/plugins/valvehowler> ;
+        lv2:symbol "hq" ;
         ui:protocol ui:floatProtocol
     ] .

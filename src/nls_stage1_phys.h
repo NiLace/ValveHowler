@@ -26,7 +26,7 @@
 // junction limiting, warm-started from the previous sample. The default build
 // replaces that per-sample Newton with the table described below.
 //
-// The device is `mna::QModel` evaluated by `mna::Engine::bjt()`, the same
+// The device is `mna::QModel` evaluated by `mna::Devices::bjt()`, the same
 // object and law the DK engine solves, and the component values are read
 // from `mna::Netlist`. Nothing here is a number of its own.
 //
@@ -40,7 +40,7 @@
 #include <cmath>
 #include "nls_mna.h"
 
-// The general `mna::Engine::bjt()` evaluates the whole Gummel-Poon card: two
+// The general `mna::Devices::bjt()` evaluates the whole Gummel-Poon card: two
 // exponentials (one of them for `ISE`, which is 0 here), the BC junction, a
 // square root and three divisions per Newton pass. The fast path is the same
 // card specialised to Q1's operating region:
@@ -151,7 +151,7 @@ public:
         const double n4 = (vr / R4_ + v5 * kInvRIN) / Gt;
         double vbe = 0.6, ib = 0.0, n3 = vr, n6 = 0.0;
         for (int it = 0; it < 60; ++it) {
-            const auto o = mna::Engine::bjt(q_, jbe_, jbc_, vbe, n3 - mna::VCC, false);
+            const auto o = mna::Devices::bjt(q_, jbe_, jbc_, vbe, n3 - mna::VCC, false);
             ib = o.ib;
             const double ie = o.ic + o.ib;
             n3 = vr - R2_ * ib;
@@ -165,7 +165,7 @@ public:
         vbe_ = vbe;
         vc1_ = 0.0 - n3;  ic1_ = 0.0;           // input at 0 V, no current in R1
         vc2_ = n6 - n4;   ic2_ = 0.0;
-        cjc_ = mna::Engine::depletion_cap(n3 - mna::VCC, q_.CJC, q_.VJC, q_.MJC, q_.FC);
+        cjc_ = mna::Devices::depletion_cap(n3 - mna::VCC, q_.CJC, q_.VJC, q_.MJC, q_.FC);
         Gj_ = g2h_ * cjc_;
         derive();
         vcj_ = n3 - mna::VCC;  icj_ = 0.0;
@@ -220,7 +220,6 @@ public:
             const double v0 = d - ka_ * P - kb_ * G;
             solve_full(A3, A6, v0, ib, ie, Q, G);
             n3 = A3 - Rth3_ * ib;
-            ++bc_hot_;
         }
         const double n6 = A6 + Rth6_ * ie;
         const double n4 = e_vr_ * vr + e_v5_ * v5 + e_n6_ * n6 + e_J2_ * J2_;
@@ -230,7 +229,6 @@ public:
         Hs_ = -2.0 * g2h_ * Q - Hs_;
         g_prev2_ = g_prev_;
         g_prev_ = G;
-        ++iters_;
         n3_ = n3;  n6_ = n6;  n4_ = n4;
         if (n3_out) *n3_out = n3;
         if (n6_out) *n6_out = n6;
@@ -273,7 +271,6 @@ public:
             qbe_ = Q;
             g_prev2_ = g_prev_;
             g_prev_ = G;
-            ++iters_;
         }
 #elif NLSC_E1_PHYS_FAST
         double vbe = vbe_, ib = 0.0, ie = 0.0, iq = 0.0;
@@ -308,9 +305,8 @@ public:
                 const double gib = gb + gq, gie = gc + gb + gq;
                 const double df = 1.0 + Ra * gib + Rth6 * gie;
                 double vn = v - f / df;
-                vn = mna::Engine::pnjlim(vn, v, mna::VT, vcrit_);
+                vn = mna::Devices::pnjlim(vn, v, mna::VT, vcrit_);
                 const double dv = vn - v;
-                ++iters_;
                 if (std::fabs(dv) < kTolFast || it == kMaxIter - 1) {
                     // The last step through the derivatives: its error is
                     // O(dv^2), below 1e-15 V at this tolerance.
@@ -333,7 +329,6 @@ public:
             && __builtin_expect(!(A3 - Rth3 * ib <= mna::VCC - kBcMargin), 0)) {
             qbe_ = qbe_in;
             newton_card(A3, A6, Rth3, Rth6, vbe, ib, ie, iq);
-            ++bc_hot_;
         }
         vbe_prev_ = vbe_;  have_prev_ = true;
         iq_ = iq;
@@ -403,7 +398,7 @@ public:
                 const double f  = phi(v, o) - d;
                 const double df = 1.0 + ka_ * o.dP + kb_ * o.dG;
                 double vn = v - f / df;
-                vn = mna::Engine::pnjlim(vn, v, mna::VT, vcrit_);
+                vn = mna::Devices::pnjlim(vn, v, mna::VT, vcrit_);
                 const double dv = vn - v;
                 v = vn;
                 if (std::fabs(dv) < 1e-15 + 1e-15 * std::fabs(v)) break;
@@ -452,7 +447,7 @@ public:
         double n3i = n3_;
         ib = ie = iq = 0.0;
         for (int it = 0; it < kMaxIter; ++it) {
-            const auto o = mna::Engine::bjt(q_, jbe_, jbc_, vbe, n3i - mna::VCC, true);
+            const auto o = mna::Devices::bjt(q_, jbe_, jbc_, vbe, n3i - mna::VCC, true);
             const double qb = o.qbe, cb = o.cbe;
             iq = g2h_ * (qb - qbe_) - iq_;
             ib = o.ib + iq;
@@ -463,16 +458,15 @@ public:
             const double df = 1.0 + (Rth3 + RB_) * (o.dib_be + gq)
                                   + Rth6 * (o.dic_be + o.dib_be + gq);
             double vn = vbe - f / df;
-            vn = mna::Engine::pnjlim(vn, vbe, mna::VT, vcrit_);
+            vn = mna::Devices::pnjlim(vn, vbe, mna::VT, vcrit_);
             const double dv = vn - vbe;
             vbe = vn;
-            ++iters_;
             if (std::fabs(dv) < kTol) break;
         }
         // Final evaluation at the converged point, so the states are updated
         // with the currents OF that point.
         {
-            const auto o = mna::Engine::bjt(q_, jbe_, jbc_, vbe, n3i - mna::VCC, true);
+            const auto o = mna::Devices::bjt(q_, jbe_, jbc_, vbe, n3i - mna::VCC, true);
             iq = g2h_ * (o.qbe - qbe_) - iq_;
             ib = o.ib + iq;
             ie = o.ic + o.ib + iq;
@@ -497,7 +491,7 @@ public:
         //   F2 = vbe − n3 + RB·ib + A6 + Rth6·ie       (KVL base-emitter)
         double v = v0, c = n3_ - mna::VCC;
         for (int it = 0; it < kMaxIter; ++it) {
-            const auto o = mna::Engine::bjt(q_, jbe_, jbc_, v, c, true);
+            const auto o = mna::Devices::bjt(q_, jbe_, jbc_, v, c, true);
             const double gq = g2h_ * o.cbe;
             const double ibv = o.ib + g2h_ * o.qbe + Hs_;
             const double iev = o.ic + ibv;
@@ -511,13 +505,13 @@ public:
             const double det = J11 * J22 - J12 * J21;
             double dv = -( F1 * J22 - J12 * F2) / det;
             double dc = -(J11 * F2 - F1 * J21) / det;
-            const double vn = mna::Engine::pnjlim(v + dv, v, mna::VT, vcrit_);
-            const double cn = mna::Engine::pnjlim(c + dc, c, mna::VT, vcrit_);
+            const double vn = mna::Devices::pnjlim(v + dv, v, mna::VT, vcrit_);
+            const double cn = mna::Devices::pnjlim(c + dc, c, mna::VT, vcrit_);
             dv = vn - v;  dc = cn - c;
             v = vn;  c = cn;
             if (std::fabs(dv) < kTol && std::fabs(dc) < kTol) break;
         }
-        const auto o = mna::Engine::bjt(q_, jbe_, jbc_, v, c, true);
+        const auto o = mna::Devices::bjt(q_, jbe_, jbc_, v, c, true);
         ib = o.ib + g2h_ * o.qbe + Hs_;
         ie = o.ic + ib;
         Q  = o.qbe;
@@ -528,11 +522,8 @@ public:
         const double k = 1.0 - c * q_.inv_VAF;
         G  = (o.ic + q_.ISoBR * e_bc) / k;
     }
-    long bc_hot() const { return bc_hot_; }
 #endif
 
-    // Observability: how many Newton iterations have run in total.
-    long iterations() const { return iters_; }
     double n4() const { return n4_; }
 
 private:
@@ -546,7 +537,7 @@ private:
 
     double qbe(double vbe) const
     {
-        return mna::Engine::bjt(q_, jbe_, jbc_, vbe, n3_ - mna::VCC, true).qbe;
+        return mna::Devices::bjt(q_, jbe_, jbc_, vbe, n3_ - mna::VCC, true).qbe;
     }
 
     // Reads the six passive components from the DK's netlist, nominal
@@ -589,7 +580,7 @@ public:
 
 private:
     mna::QModel q_{};
-    mna::Engine::Junc jbe_{}, jbc_{};
+    mna::Devices::Junc jbe_{}, jbc_{};
     double R1_ = 0, R2_ = 0, R3_ = 0, R4_ = 0, C1_ = 0, C2_ = 0, RB_ = 0;
     double vcrit_ = 0.0;
     double h_ = 0, g2h_ = 0, G1_ = 0, G2_ = 0, Ga_ = 0, Gj_ = 0, cjc_ = 0;
@@ -605,7 +596,6 @@ private:
     double b_vr_ = 0, b_v5_ = 0, b_J2_ = 0, kH_ = 0, c0_ = 0;
     double e_vr_ = 0, e_v5_ = 0, e_n6_ = 0, e_J2_ = 0, f_in_ = 0, f_J1_ = 0;
     double J1_ = 0, J2_ = 0, Jj_ = 0, Hs_ = 0;     // Norton histories
-    long bc_hot_ = 0;
     // n3 this close to the collector sends the sample to the full card. At
     // 0,5 V of reverse bias the BC junction carries IS·e^(−19): nothing.
     static constexpr double kBcMargin = 0.5;
@@ -623,7 +613,6 @@ private:
     double tab_g2h_ = -1.0, tab_gj_ = -1.0, tab_k0_ = -1.0;   // the built table's key
 #endif
     double n3_ = 0, n6_ = 0, n4_ = 0;
-    long iters_ = 0;
 };
 
 } // namespace nlsc

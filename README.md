@@ -38,15 +38,18 @@ under the signal — none of that is added flavour, it falls out of solving the 
 network the pedal is. The arbiter throughout development was **ngspice** running
 the same netlist: not a listening test, and not a capture of somebody's unit.
 
-The non-linear part runs at **4× internally** so its harmonics don't fold back into
-the audible band. That costs **31 samples** of latency at any session rate (0.65 ms at 48 kHz); the
-plugin reports it and the host compensates. The resampling filters are long enough
-to keep the top octave: the 17th and 19th harmonics of a 1 kHz note (18 and 20 kHz)
-come out within 0.6 dB of the same plugin run at 192 kHz.
+Its two op-amp stages run on a model of the real **4558** dual op-amp, not an ideal
+one: how far each output can swing before it clips follows the datasheet's curves for
+its load and supply, so a hard-driven pedal runs out of headroom where the chip does.
+
+The non-linear part is oversampled internally so its harmonics don't fold back into
+the audible band: **2× by default**, and **4× with the HQ button on**. That costs
+**31 samples** of latency at any session rate (0.65 ms at 48 kHz), the same with HQ on
+or off; the plugin reports it and the host compensates.
 
 ## The front panel
 
-Three knobs and a footswitch, like the pedal:
+Three knobs and a footswitch, like the pedal, plus an **HQ** button:
 
 - **Drive** — how hard the signal is pushed into the clipping stage. At the low end
   it's a clean boost; at the top it's thick and compressed.
@@ -58,6 +61,19 @@ Three knobs and a footswitch, like the pedal:
   it being an invented toggle only this plugin knows about. Engaged, the name and the
   knob labels are printed in blue; bypassed, they fade to grey and the variant
   display goes dark.
+- **HQ** — the button above the Tone legend switches the high-quality mode, and lights
+  up when it is on. **For usual playing, the default (HQ off) should be enough.**
+  **HQ is recommended if you play a lot of pinched harmonics**, which it keeps
+  noticeably cleaner, **and when the signal reaching the plugin peaks above 0 dBFS**,
+  which only happens with a booster, an overdrive or a gain plugin inserted before the
+  Valve Howler (see *Input level* below). With the interface's gain set so your playing
+  stays below 0 dBFS, the default is enough. HQ uses more CPU. It switches through the dry signal
+  like a variant change, so it does not click, and the latency does not change. The
+  button answers while the pedal is engaged.
+
+  *The technical detail:* with HQ off the top octave is very slightly softer, by
+  about 1.3 to 2.2 dB at 18 to 20 kHz; with HQ on the top octave is exact (within
+  0.6 dB of the same plugin run at 192 kHz).
 
 Drag a knob up or down to set it, or use the mouse wheel. Between the knobs and the
 footswitch is the **variant display**: click it to choose a variant. While the pedal
@@ -69,6 +85,24 @@ same 31 samples** the plugin reports — deliberately, so that mixing in paralle
 a dry path stays aligned instead of eating a comb filter. And it crossfades over
 about 10 ms rather than switching hard, because the engine's resting output isn't
 zero and a hard jump would click.
+
+## Input level
+
+The plugin reads each sample as the voltage at the pedal's input jack: **a sample of 1.0
+(0 dBFS) is 1 V of peak**. Nothing normalises or meters the input, so your audio interface's
+input gain plays the role of your guitar's output: more gain drives the pedal harder, as a
+hotter pickup drives the real one.
+
+- The figures behind this plugin were measured with a guitar DI peaking at **−6 dBFS
+  (0.5 V)** for normal playing and at **+6 dBFS (2 V)** for a hot input; the model is checked
+  against the circuit up to **+9.5 dBFS (3 V)**.
+- An interface clips at 0 dBFS, so levels above it only reach the plugin through gain added
+  in between (a booster pedal or a gain plugin before the Valve Howler). That is where HQ
+  matters most.
+- A practical setting: raise the interface's gain until your hardest playing peaks a little
+  below 0 dBFS without clipping, then shape the sound with Drive. To match a particular
+  guitar into the real pedal exactly, you would need to know how many volts your interface
+  turns into 0 dBFS at that gain setting.
 
 ## The variants
 

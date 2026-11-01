@@ -8,6 +8,42 @@ numbers.
 
 ---
 
+## 1.6.0 — 2026-11-01
+
+Sessions saved with 1.4.4 load with HQ off, the new default; switch HQ on for the
+processing of earlier versions. Driven very hard, the clipping now follows the real op-amp
+(below).
+
+- **New HQ switch, with its button on the panel** above the Tone legend. The pedal now
+  runs lighter on the CPU by default. For usual playing, the default should be enough.
+  HQ is recommended for pinched harmonics, and when the signal reaching the plugin peaks
+  above 0 dBFS (a booster, an overdrive or a gain plugin before the Valve Howler; the
+  README's *Input level* explains the levels). Switching HQ on restores the higher-quality oversampling of earlier
+  versions, which keeps pinched harmonics and very hot inputs cleaner, at the cost of
+  more CPU, most of it with very hot inputs. The switch fades through the dry signal
+  like a variant change, so it does not click, and the latency reported to the host does
+  not change.
+
+  The technical detail: with HQ off the top octave is very slightly softer, about 1.3
+  to 2.2 dB down at 18 to 20 kHz; with HQ on the top octave is exact.
+- **The op-amp is now the real 4558's.** Its output headroom follows the manufacturer's
+  datasheet curves (how far the output can swing at each load and supply) instead of a
+  fixed limit. At usual playing levels nothing changes; driven very hard, the clipping
+  of the drive stage comes closer to the circuit's, most audibly with a booster in front.
+- **The variant list closes when the host hides or moves the editor**, and gives the
+  mouse and keyboard back.
+- **The editor opens faster, and reopens almost at once**: the panel's images are
+  decoded once per process instead of on every open.
+- **Several editors of this family of pedals open at once** keep their display errors to
+  themselves; one closing can no longer disturb the others.
+- **The source is much smaller**: code the plugin never ran, measurement leftovers and
+  stale comments are gone. The sound does not change: the output is identical sample for
+  sample to the build before the cleanup.
+- The version goes from 1.4.4 to 1.6.0, not 1.5.0: an odd middle number marks a
+  development version under the LV2 rules.
+
+---
+
 ## 1.4.4 — 2026-10-25
 
 Sessions saved with 1.4.2 load unchanged, and the sound is the same.

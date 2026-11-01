@@ -4,7 +4,9 @@
 //
 // No X in here, so the preview tool draws exactly what the host shows. The images
 // are rendered at twice the logical size (HiDPI), and scaled once per scale factor
-// into a cache, never per paint.
+// into a cache, never per paint. Decoding and scaling run on a few threads, one image
+// per job: each image is decoded or scaled by exactly the code of the serial path, so
+// the result does not depend on how the jobs fall on the threads.
 //
 // Layers, back to front:
 //   plate      the whole top for the variant's green and the `enabled` state, knobs
@@ -12,6 +14,10 @@
 //   knobs      one frame of each knob's strip, pasted through a soft circular mask
 //              over its base circle (the paint around it is the plate's)
 //   treadle    one frame of the treadle strip (rest -> pressed)
+//   hq         the HQ button, active state only (it lights only with the pedal on):
+//              its pressed frames unlit, then its light over them (the `hq` port,
+//              faded), both at the active plate's alpha; at rest and unlit the plate
+//              shows it as it is
 //   readout    the variant name and the caret, drawn live in the dot-matrix face
 #pragma once
 
@@ -19,9 +25,12 @@
 
 #include <cairo.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace nlsc {
@@ -39,24 +48,53 @@ inline constexpr unsigned READOUT_HEX[2] = { 0x91FF7E, 0x6AF4B3 };
 inline constexpr double KNOB_MIN_DEG = -135.0, KNOB_MAX_DEG = 135.0; // the scale dots' travel
 inline constexpr double FADE_S = 0.120;              // plate crossfade on bypass
 inline constexpr double TREADLE_S = 0.080;           // treadle travel, down or up
+inline constexpr double HQ_PRESS_S = 0.050;          // the HQ button's travel, down or up
+inline constexpr double HQ_GLOW_S = 0.100;           // the HQ light's fade, on or off
 
 // The circuit decides the paint: the OD-8 rows are OD-8 green, the OD-9 rows OD-9 green.
 inline int green_of_circuit(int circuit) { return circuit == 0 ? GREEN_OD8 : GREEN_OD9; }
 
+// --- a few threads over a list of independent jobs -------------------------------
+
+inline constexpr unsigned MAX_THREADS = 6;
+
+// Runs job(0..n-1), each once, on up to MAX_THREADS threads (the caller's among them), and
+// returns when all are done. The jobs are taken in list order, so a list puts its longest
+// first. A thread that cannot be created leaves its share to the others; `threaded` false
+// runs them all on the caller's thread (the reference path of the gates).
+inline void run_jobs(int n, const std::function<void(int)>& job, bool threaded = true)
+{
+    std::atomic<int> next{ 0 };
+    auto worker = [&] { for (int i; (i = next.fetch_add(1)) < n;) job(i); };
+    unsigned nt = threaded ? std::min(std::max(1u, std::thread::hardware_concurrency()), MAX_THREADS) : 1u;
+    nt = std::min(nt, unsigned(std::max(n, 1)));
+    std::vector<std::thread> t;
+    for (unsigned i = 1; i < nt; ++i) {
+        try { t.emplace_back(worker); } catch (...) { break; }
+    }
+    worker();
+    for (auto& th : t) th.join();
+}
+
 // --- the images, as loaded from the bundle --------------------------------------
 
-// One green at a time: only one is ever on screen, and decoding both would cost ~60 MB and
-// ~290 ms when opening the window. The other loads when the variant changes circuit.
+// PNG decodes since the process started: the gates read it to tell a decode from a cache hit.
+inline std::atomic<unsigned> g_png_decodes{ 0 };
+
+// One green at a time: only one is ever on screen, and decoding both would cost ~60 MB when
+// opening the window. The other loads when the variant changes circuit.
 struct Assets {
     int green = -1;
     cairo_surface_t* plate[2] = {};      // [0 active, 1 bypass]
     cairo_surface_t* knob[3]  = {};      // [drive, level, tone]: frames stacked vertically
     cairo_surface_t* treadle  = nullptr;
+    cairo_surface_t* hq[2]    = {};      // [unlit, lit]: frames rest -> pressed, the active state's
     bool ok = false;
 };
 
 inline cairo_surface_t* load_png(const std::string& path)
 {
+    g_png_decodes.fetch_add(1);
     cairo_surface_t* s = cairo_image_surface_create_from_png(path.c_str());
     if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(s); return nullptr; }
     return s;
@@ -67,33 +105,58 @@ inline void free_assets(Assets& a)
     for (auto* s : a.plate) if (s) cairo_surface_destroy(s);
     for (auto* s : a.knob)  if (s) cairo_surface_destroy(s);
     if (a.treadle) cairo_surface_destroy(a.treadle);
+    for (auto* s : a.hq)    if (s) cairo_surface_destroy(s);
     a = Assets{};
+}
+
+// One image to decode: its file, where it goes, and the size it must have.
+struct LoadJob {
+    std::string name;
+    cairo_surface_t** dst;
+    int w, h;
+};
+
+// Every image of green `g`, into `a`'s slots. The knob strips are most of the pixels, so they
+// come first, then the plates; the treadle is the same in both greens and is left out when
+// `share_treadle` (the caller takes it from the other green's set).
+inline std::vector<LoadJob> load_list(Assets& a, int g, bool share_treadle = false)
+{
+    std::vector<LoadJob> l;
+    for (int k = 0; k < 3; ++k) {
+        const KnobGeo& kg = KNOBS[k];
+        l.push_back({ std::string("knob_") + GREEN_NAME[g] + "_" + kg.name + ".png", &a.knob[k],
+                      kg.x1 - kg.x0, (kg.y1 - kg.y0) * kg.frames });
+    }
+    for (int s = 0; s < 2; ++s)
+        l.push_back({ std::string("plate_") + GREEN_NAME[g] + (s ? "_bypass" : "_active") + ".png", &a.plate[s],
+                      int(ASSET_W), int(ASSET_H) });
+    for (int h = 0; h < 2; ++h)
+        l.push_back({ std::string("hq_") + GREEN_NAME[g] + (h ? "_lit" : "_active") + ".png", &a.hq[h],
+                      HQ_X1 - HQ_X0, (HQ_Y1 - HQ_Y0) * HQ_FRAMES });
+    if (!share_treadle)
+        l.push_back({ "treadle.png", &a.treadle, TREADLE_X1 - TREADLE_X0, (TREADLE_Y1 - TREADLE_Y0) * TREADLE_FRAMES });
+    return l;
+}
+
+inline bool sized(cairo_surface_t* s, int w, int h)
+{
+    return s && cairo_image_surface_get_width(s) == w && cairo_image_surface_get_height(s) == h;
 }
 
 // `dir` is the bundle's `photo/` directory. A missing or unreadable image leaves `ok` false and
 // the UI draws a plain placeholder: a panel with a hole in it would look like the plugin.
-inline Assets load_assets(const std::string& dir, int g)
+// `other`, when it holds the other green's images, lends its treadle (a second reference to
+// the same surface) instead of decoding it again.
+inline Assets load_assets(const std::string& dir, int g, const Assets* other = nullptr, bool threaded = true)
 {
     Assets a;
     a.green = g;
-    bool ok = true;
-    for (int s = 0; s < 2; ++s) {
-        a.plate[s] = load_png(dir + "/plate_" + GREEN_NAME[g] + (s ? "_bypass" : "_active") + ".png");
-        ok &= a.plate[s] != nullptr &&
-              cairo_image_surface_get_width(a.plate[s]) == int(ASSET_W) &&
-              cairo_image_surface_get_height(a.plate[s]) == int(ASSET_H);
-    }
-    for (int k = 0; k < 3; ++k) {
-        const KnobGeo& kg = KNOBS[k];
-        a.knob[k] = load_png(dir + "/knob_" + GREEN_NAME[g] + "_" + kg.name + ".png");
-        ok &= a.knob[k] != nullptr &&
-              cairo_image_surface_get_width(a.knob[k]) == kg.x1 - kg.x0 &&
-              cairo_image_surface_get_height(a.knob[k]) == (kg.y1 - kg.y0) * kg.frames;
-    }
-    a.treadle = load_png(dir + "/treadle.png");
-    ok &= a.treadle != nullptr &&
-          cairo_image_surface_get_width(a.treadle) == TREADLE_X1 - TREADLE_X0 &&
-          cairo_image_surface_get_height(a.treadle) == (TREADLE_Y1 - TREADLE_Y0) * TREADLE_FRAMES;
+    const bool share = other && other->ok && other->treadle;
+    const std::vector<LoadJob> l = load_list(a, g, share);
+    run_jobs(int(l.size()), [&](int i) { *l[size_t(i)].dst = load_png(dir + "/" + l[size_t(i)].name); }, threaded);
+    if (share) a.treadle = cairo_surface_reference(other->treadle);
+    bool ok = sized(a.treadle, TREADLE_X1 - TREADLE_X0, (TREADLE_Y1 - TREADLE_Y0) * TREADLE_FRAMES);
+    for (const LoadJob& j : l) ok &= sized(*j.dst, j.w, j.h);
     a.ok = ok;
     return a;
 }
@@ -107,8 +170,10 @@ struct Scaled {
     cairo_surface_t* plate[2] = {};
     std::vector<cairo_surface_t*> knob[3];
     std::vector<cairo_surface_t*> treadle;
+    std::vector<cairo_surface_t*> hq[2];
     int kx[3] = {}, ky[3] = {};          // integer window position of each knob frame
     int tx = 0, ty = 0;
+    int hx = 0, hy = 0;
 };
 
 inline void free_scaled(Scaled& s)
@@ -116,6 +181,7 @@ inline void free_scaled(Scaled& s)
     for (auto*& p : s.plate) if (p) cairo_surface_destroy(p);
     for (auto& v : s.knob) for (auto* p : v) cairo_surface_destroy(p);
     for (auto* p : s.treadle) cairo_surface_destroy(p);
+    for (auto& v : s.hq) for (auto* p : v) cairo_surface_destroy(p);
     s = Scaled{};
 }
 
@@ -140,29 +206,48 @@ inline cairo_surface_t* resample(cairo_surface_t* src, double sx, double sy, dou
     return dst;
 }
 
-inline void ensure_scaled(Scaled& s, const Assets& a, double f)
+// The longest jobs first, as in load_assets: the knobs' 64 frames each, then the plates. Each
+// job reads its own source image and writes its own surfaces: no cairo object is shared
+// between two threads.
+inline void ensure_scaled(Scaled& s, const Assets& a, double f, bool threaded = true)
 {
     if (!a.ok || (s.f == f && s.green == a.green)) return;
     free_scaled(s);
     s.f = f; s.green = a.green;
     const int W = int(std::ceil(ASSET_W * f)), H = int(std::ceil(ASSET_H * f));
-    for (int st = 0; st < 2; ++st)
-        s.plate[st] = resample(a.plate[st], 0, 0, ASSET_W, ASSET_H, 0, 0, f, 0, 0, W, H);
     for (int k = 0; k < 3; ++k) {
-        const KnobGeo& kg = KNOBS[k];
-        const int w = kg.x1 - kg.x0, h = kg.y1 - kg.y0;
-        s.kx[k] = int(std::floor(kg.x0 * f)); s.ky[k] = int(std::floor(kg.y0 * f));
-        const int pw = int(std::ceil(kg.x1 * f)) - s.kx[k], ph = int(std::ceil(kg.y1 * f)) - s.ky[k];
-        for (int i = 0; i < kg.frames; ++i)
-            s.knob[k].push_back(resample(a.knob[k], 0, double(i * h), w, h, kg.x0, kg.y0,
-                                         f, s.kx[k], s.ky[k], pw, ph));
+        s.kx[k] = int(std::floor(KNOBS[k].x0 * f)); s.ky[k] = int(std::floor(KNOBS[k].y0 * f));
     }
-    const int tw = TREADLE_X1 - TREADLE_X0, th = TREADLE_Y1 - TREADLE_Y0;
     s.tx = int(std::floor(TREADLE_X0 * f)); s.ty = int(std::floor(TREADLE_Y0 * f));
-    const int pw = int(std::ceil(TREADLE_X1 * f)) - s.tx, ph = int(std::ceil(TREADLE_Y1 * f)) - s.ty;
-    for (int i = 0; i < TREADLE_FRAMES; ++i)
-        s.treadle.push_back(resample(a.treadle, 0, double(i * th), tw, th, TREADLE_X0, TREADLE_Y0,
-                                     f, s.tx, s.ty, pw, ph));
+    s.hx = int(std::floor(HQ_X0 * f)); s.hy = int(std::floor(HQ_Y0 * f));
+    auto job = [&](int i) {
+        if (i < 3) {
+            const int k = i;
+            const KnobGeo& kg = KNOBS[k];
+            const int w = kg.x1 - kg.x0, h = kg.y1 - kg.y0;
+            const int pw = int(std::ceil(kg.x1 * f)) - s.kx[k], ph = int(std::ceil(kg.y1 * f)) - s.ky[k];
+            for (int fr = 0; fr < kg.frames; ++fr)
+                s.knob[k].push_back(resample(a.knob[k], 0, double(fr * h), w, h, kg.x0, kg.y0,
+                                             f, s.kx[k], s.ky[k], pw, ph));
+        } else if (i < 5) {
+            const int st = i - 3;
+            s.plate[st] = resample(a.plate[st], 0, 0, ASSET_W, ASSET_H, 0, 0, f, 0, 0, W, H);
+        } else if (i >= 6) {
+            const int h = i - 6;
+            const int w = HQ_X1 - HQ_X0, fh = HQ_Y1 - HQ_Y0;
+            const int pw = int(std::ceil(HQ_X1 * f)) - s.hx, ph = int(std::ceil(HQ_Y1 * f)) - s.hy;
+            for (int fr = 0; fr < HQ_FRAMES; ++fr)
+                s.hq[h].push_back(resample(a.hq[h], 0, double(fr * fh), w, fh, HQ_X0, HQ_Y0,
+                                           f, s.hx, s.hy, pw, ph));
+        } else {
+            const int tw = TREADLE_X1 - TREADLE_X0, th = TREADLE_Y1 - TREADLE_Y0;
+            const int pw = int(std::ceil(TREADLE_X1 * f)) - s.tx, ph = int(std::ceil(TREADLE_Y1 * f)) - s.ty;
+            for (int fr = 0; fr < TREADLE_FRAMES; ++fr)
+                s.treadle.push_back(resample(a.treadle, 0, double(fr * th), tw, th, TREADLE_X0, TREADLE_Y0,
+                                             f, s.tx, s.ty, pw, ph));
+        }
+    };
+    run_jobs(8, job, threaded);
 }
 
 // --- what is drawn ---------------------------------------------------------------
@@ -172,6 +257,8 @@ struct View {
     int    green = GREEN_OD9;
     double lit = 1.0;          // 1 active plate, 0 bypass plate; in between while crossfading
     double treadle = 0.0;      // 0 rest .. 1 pressed
+    double hq_press = 0.0;     // the HQ button: 0 rest .. 1 pressed
+    double hq_glow = 0.0;      // its light: 0 off .. 1 on (the `hq` port, faded)
     bool   display_lit = true; // the readout shows (active, hovered or the list open)
     const char* variant = "";
     cairo_font_face_t* face = nullptr;   // the dot-matrix face; null falls back to monospace
@@ -257,6 +344,20 @@ inline void draw_panel(cairo_t* cr, const Scaled& s, const View& v)
     if (v.lit > 0.0) {
         cairo_set_source_surface(cr, s.plate[0], 0, 0);
         cairo_paint_with_alpha(cr, std::min(v.lit, 1.0));
+    }
+    // HQ, active state only: its pressed frames unlit, then its light over them
+    {
+        const int hf = std::clamp(int(std::lround(v.hq_press * (HQ_FRAMES - 1))), 0, HQ_FRAMES - 1);
+        const double a = std::min(std::max(v.lit, 0.0), 1.0);
+        if (a > 0.0 && hf > 0) {              // at rest the plate shows it unlit
+            cairo_set_source_surface(cr, s.hq[0][size_t(hf)], s.hx, s.hy);
+            cairo_paint_with_alpha(cr, a);
+        }
+        const double gl = std::min(std::max(v.hq_glow, 0.0), 1.0);
+        if (a > 0.0 && gl > 0.0) {
+            cairo_set_source_surface(cr, s.hq[1][size_t(hf)], s.hx, s.hy);
+            cairo_paint_with_alpha(cr, a * gl);
+        }
     }
     // knobs, each through a soft circular mask over its base circle
     const double values[3] = { v.drive, v.level, v.tone };

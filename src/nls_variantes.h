@@ -19,11 +19,11 @@
 //
 // This table covers axis 1 only, and has one circuit per distinct resistor
 // pair. The axis-1 sources: Keen's table, Wampler's book (which marks them on
-// a photo of the board, `808-1` = 100 Ω and `808-2` = 10 kΩ, p. 255) and the
+// a photo of the board, `OD-8-1` = 100 Ω and `OD-8-2` = 10 kΩ, p. 255) and the
 // netlist transcribed from the original Eagle files, which carries the
-// factory 808.
+// factory OD-8.
 //
-// Models 9, 9RI and 5 share one row because in this model they are
+// The OD-9 row stands for three boxes because in this model they are
 // electrically identical: they share the 470/100k pair, and only the opamp
 // (axis 2) would separate them.
 //
@@ -88,36 +88,36 @@ struct Variant {
 // model incoherent with no error raised. To try a different resistor,
 // regenerate the whole variant's bank. Without a -D on the command line these
 // macros evaluate to the values below.
-#ifndef NLSC_V808_RSER
-#  define NLSC_V808_RSER 100.0
+#ifndef NLSC_OD8_RSER
+#  define NLSC_OD8_RSER 100.0
 #endif
-#ifndef NLSC_V808_RSHUNT
-#  define NLSC_V808_RSHUNT 10e3
+#ifndef NLSC_OD8_RSHUNT
+#  define NLSC_OD8_RSHUNT 10e3
 #endif
-#ifndef NLSC_V9RI_RSER
-#  define NLSC_V9RI_RSER 470.0
+#ifndef NLSC_OD9_RSER
+#  define NLSC_OD9_RSER 470.0
 #endif
-#ifndef NLSC_V9RI_RSHUNT
-#  define NLSC_V9RI_RSHUNT 100e3
+#ifndef NLSC_OD9_RSHUNT
+#  define NLSC_OD9_RSHUNT 100e3
 #endif
 
 inline constexpr Circuit kCircuits[] = {
-    { NLSC_V808_RSER, NLSC_V808_RSHUNT },   // 0 — the factory 808
-    { NLSC_V9RI_RSER, NLSC_V9RI_RSHUNT },   // 1 — the OD-9
+    { NLSC_OD8_RSER, NLSC_OD8_RSHUNT },   // 0 — the factory OD-8
+    { NLSC_OD9_RSER, NLSC_OD9_RSHUNT },   // 1 — the OD-9
 };
 inline constexpr int kNumCircuits = int(sizeof(kCircuits) / sizeof(kCircuits[0]));
 
 inline constexpr Variant kVariants[] = {
     { "OD-8 W Tone",           0, ToneLaw::Pot  },
     { "OD-9 W Tone",           1, ToneLaw::Pot  },
-    // The same 808, with the tone knob's travel redistributed. Re-voicing,
-    // not fidelity: the circuit and the bank are the 808's; only the
+    // The same OD-8, with the tone knob's travel redistributed. Re-voicing,
+    // not fidelity: the circuit and the bank are the OD-8's; only the
     // position -> parameter law changes. It is its own row because the
     // faithful rows keep the hardware's taper.
     { "OD-8 L Tone",      0, ToneLaw::Even },
     // The same law on the other circuit. One table serves both: stage 3
     // does not depend on the variant (under 0,0004 dB when `R14`/`R15`
-    // change), so there is no `_v9ri` law.
+    // change), so there is no `_od9` law.
     { "OD-9 L Tone",          1, ToneLaw::Even },
 };
 inline constexpr int kNumVariants = int(sizeof(kVariants) / sizeof(kVariants[0]));

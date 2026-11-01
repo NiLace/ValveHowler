@@ -16,7 +16,7 @@
 // with -fvisibility=hidden, really unloads, and the fonts must not depend on
 // which); when Cairo finally drops the face,
 // FreeType frees the library and the face, and nothing calls back into this
-// module (ValveHowler#11: with a destructor in the module the host jumped into
+// module (with a destructor in the module the host jumps into
 // unmapped code; gate `make ui-unload`).
 //
 // `FT_Done_FreeType` is `FT_Error(*)(FT_Library)` called as Cairo's

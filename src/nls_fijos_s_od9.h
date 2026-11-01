@@ -12,15 +12,15 @@
 // level), coefficients from highest to lowest power, monic denominator.
 //
 // Generator invocation:
-//     --stage1 src/nls_stage1_coef_v9ri_384k.h
-//     --e234   src/nls_e234_coef_v9ri_384k.h
-//     --rail   src/nls_rail_n3_v9ri_384k.h
-//     --railvr src/nls_rail_vr_v9ri.h
-//     --output src/nls_fijos_s_v9ri.h
+//     --stage1 src/nls_stage1_coef_od9_384k.h
+//     --e234   src/nls_e234_coef_od9_384k.h
+//     --rail   src/nls_rail_n3_od9_384k.h
+//     --railvr src/nls_rail_vr_od9.h
+//     --output src/nls_fijos_s_od9.h
 #pragma once
 
 namespace nlsc {
-namespace fixed_v9ri {
+namespace fixed_od9 {
 
 static constexpr double kScale = 6283.1853071795858;
 
@@ -210,5 +210,5 @@ static constexpr double kVRP_A[3][1] = {
     {+2.95246803072482935e-06},
 };
 
-} // namespace fixed_v9ri
+} // namespace fixed_od9
 } // namespace nlsc

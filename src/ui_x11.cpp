@@ -5,16 +5,17 @@
 // This is the window-and-events layer. All painting lives in `ui_photo.h`
 // (the photoreal panel: Blender renders composited with Cairo); here lives:
 //   - creating a child window inside the one the host provides,
-//   - wrapping it in a `cairo_xlib_surface`, loading the panel images and the
-//     bundle fonts,
+//   - wrapping it in a `cairo_xlib_surface`, loading the bundle fonts,
+//   - the panel images: decoded once per process into a cache the instances
+//     share, and scaled from it once per window size,
 //   - pumping X events in the `idle` callback (expose / mouse),
 //   - turning a knob drag into port writes,
-//   - toggling the footswitch (`lv2:enabled`) and opening the variant
-//     dropdown,
+//   - toggling the footswitch (`lv2:enabled`), the HQ button (`hq`, only
+//     while the pedal is on) and opening the variant dropdown,
 //   - reflecting on the panel what the host changes on its own
 //     (`port_event`),
-//   - the two short animations: the plates crossfade on bypass and the
-//     treadle travels.
+//   - the short animations: the plates crossfade on bypass, the treadle and
+//     the HQ button travel, the HQ light fades.
 //
 // No Pugl and no SVG renderer: just Xlib + cairo-xlib + FreeType, already
 // on the system. X11 on purpose (under Wayland it runs via XWayland).
@@ -33,6 +34,7 @@
 // 3. `ui:touch`: the host is told when a gesture on a knob begins and ends,
 //    which touch-mode automation and MIDI-learn rely on (the LV2 UI spec).
 
+#include "nls_x_shield.h"
 #include "ui_photo.h"
 #include "ui_fonts.h"
 #include "nls_variantes.h"
@@ -57,6 +59,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 // Declared weak: libX11 before 1.7 has no per-connection I/O exit handler, and
@@ -76,6 +79,7 @@ using nlsc::PORT_TONE;
 using nlsc::PORT_LEVEL;
 using nlsc::PORT_ENABLED;
 using nlsc::PORT_VARIANT;
+using nlsc::PORT_HQ;
 
 // NaN-safe: fmax/fmin return the non-NaN operand, so a NaN lands on 0.
 inline double clamp01(double v) { return std::fmin(1.0, std::fmax(0.0, v)); }
@@ -99,6 +103,14 @@ constexpr double WHEEL_STEP  = 0.02;
 
 // There is no frame-rate cap: see `ui_idle`.
 
+// Negative arms of the HQ gate (`make ui-hq`), for test builds only:
+// NLSC_UI_HQ_MUTANT=1 toggles the button's light on a click without writing the port;
+// NLSC_UI_HQ_MUTANT=2 ignores the host's `hq` value; NLSC_UI_HQ_MUTANT=3 lets HQ be
+// clicked in bypass.
+#ifndef NLSC_UI_HQ_MUTANT
+#define NLSC_UI_HQ_MUTANT 0
+#endif
+
 
 // --- the variant dropdown ----------------------------------------------------
 struct Popup {
@@ -111,6 +123,8 @@ struct Popup {
     int  hover = -1;                    // row under the mouse, or −1
     bool is_open = false;
     Window focus_at_open = 0;           // who had the keyboard focus when it opened
+    int  map_at_open = IsUnmapped;      // our window's map state and root position when it
+    int  ax = 0, ay = 0;                // opened: the list follows neither, so it closes
     int  frame = 0;                     // width of the bevelled frame around the rows
 };
 
@@ -140,21 +154,28 @@ struct UI {
     const LV2UI_Touch*   touch = nullptr;
 
     nlsc::ui::Fonts      fonts_;
-    photo::Assets        assets;     // as loaded from the bundle, for the current variant's green
     std::string          photo_dir;  // the bundle's photo/
+    bool                 cache_user = false;  // counted among the shared image cache's users
+    photo::Assets        own[2];     // [green]: when the cache holds another bundle's images
     photo::Scaled        scaled;     // the images at this window's scale
+    int    failed_green = -1;        // the images did not load for this green at this size:
+    double failed_fit = -1.0;        // not retried until either changes
 
     // What the panel shows. Knob values are the ports' (0..1).
     double knob[3] = { 0.5, 0.5, 0.5 };   // drive, level, tone
     bool   knob_dirty[3] = {};            // moved, not yet written to the port
     bool   on = true;                     // `enabled`
     bool   pressed = false;               // the treadle held down
+    bool   hq = false;                    // the `hq` port (the TTL's default: 2x)
+    bool   hq_held = false;               // the HQ button held down
     int    variant = 0;
     bool   display_hover = false;         // the pointer is over the variant display
 
     // The two animations, driven by the clock (not by how often the host idles).
     double lit = 1.0, lit_from = 1.0, lit_t0 = -1.0;          // plate crossfade
     double tread = 0.0, tread_from = 0.0, tread_t0 = -1.0;    // treadle travel
+    double hqp = 0.0, hqp_from = 0.0, hqp_t0 = -1.0;          // the HQ button's travel
+    double glow = 0.0, glow_from = 0.0, glow_t0 = -1.0;       // the HQ light
 
     int    drag = -1;          // index into `knob`, or −1
     double drag_y0 = 0.0, drag_v0 = 0.0;
@@ -236,6 +257,15 @@ bool hit_footswitch(const UI* ui, double px, double py)
     return photo::in_box(photo::TREADLE_HIT, x, y);
 }
 
+// HQ answers only while the pedal is on, as on the sibling pedals: in bypass the
+// button is dark and a click on it does nothing.
+bool hit_hq(const UI* ui, double px, double py)
+{
+    if (!ui->on && NLSC_UI_HQ_MUTANT != 3) return false;
+    double x, y; to_asset(ui, px, py, &x, &y);
+    return photo::in_box(photo::HQ_HIT, x, y);
+}
+
 bool hit_dropdown(const UI* ui, double px, double py)
 {
     double x, y; to_asset(ui, px, py, &x, &y);
@@ -257,22 +287,42 @@ void start_treadle(UI* ui)
     ui->needs_paint = true;
 }
 
-// Advance both animations to `now`; true while either still moves.
+void start_hqp(UI* ui)
+{
+    ui->hqp_from = ui->hqp;
+    ui->hqp_t0 = seconds_now();
+    ui->needs_paint = true;
+}
+
+void start_glow(UI* ui)
+{
+    ui->glow_from = ui->glow;
+    ui->glow_t0 = seconds_now();
+    ui->needs_paint = true;
+}
+
+// One linear animation from `from` towards `to` over `dur` seconds since `*t0`. True when
+// it changed the value, the LAST step included: the end state must be painted too.
+bool step_animation(double* x, double from, double* t0, double to, double dur, double now)
+{
+    if (*t0 < 0.0) return false;
+    const double t = (now - *t0) / dur;
+    if (t >= 1.0) { *x = to; *t0 = -1.0; return true; }
+    *x = from + (to - from) * std::fmax(0.0, t);
+    return true;
+}
+
+// Advance the animations to `now`; true when any changed what is drawn.
+// The step that lands an animation on its end counts: the plate crossfade and the
+// treadle must not stop one frame short (that step must return true, or the end state
+// waits for an unrelated repaint and a bypassed panel still faintly shows the active plate).
 bool animate(UI* ui, double now)
 {
     bool moving = false;
-    const double lit_to = ui->on ? 1.0 : 0.0;
-    if (ui->lit_t0 >= 0.0) {
-        const double t = (now - ui->lit_t0) / photo::FADE_S;
-        if (t >= 1.0) { ui->lit = lit_to; ui->lit_t0 = -1.0; }
-        else { ui->lit = ui->lit_from + (lit_to - ui->lit_from) * std::fmax(0.0, t); moving = true; }
-    }
-    const double tread_to = ui->pressed ? 1.0 : 0.0;
-    if (ui->tread_t0 >= 0.0) {
-        const double t = (now - ui->tread_t0) / photo::TREADLE_S;
-        if (t >= 1.0) { ui->tread = tread_to; ui->tread_t0 = -1.0; }
-        else { ui->tread = ui->tread_from + (tread_to - ui->tread_from) * std::fmax(0.0, t); moving = true; }
-    }
+    moving |= step_animation(&ui->lit, ui->lit_from, &ui->lit_t0, ui->on ? 1.0 : 0.0, photo::FADE_S, now);
+    moving |= step_animation(&ui->tread, ui->tread_from, &ui->tread_t0, ui->pressed ? 1.0 : 0.0, photo::TREADLE_S, now);
+    moving |= step_animation(&ui->hqp, ui->hqp_from, &ui->hqp_t0, ui->hq_held ? 1.0 : 0.0, photo::HQ_PRESS_S, now);
+    moving |= step_animation(&ui->glow, ui->glow_from, &ui->glow_t0, ui->hq ? 1.0 : 0.0, photo::HQ_GLOW_S, now);
     return moving;
 }
 
@@ -285,6 +335,21 @@ void set_variant(UI* ui, int idx)
         ui->write(ui->ctl, PORT_VARIANT, sizeof(float), 0, &pv);
     }
     ui->needs_paint = true;
+}
+
+// A click on HQ: the port is written inside a `touch` bracket, like every gesture.
+void toggle_hq(UI* ui)
+{
+    ui->hq = !ui->hq;
+    if (NLSC_UI_HQ_MUTANT != 1) {
+        notify_touch(ui, PORT_HQ, true);
+        if (ui->write) {
+            float pv = ui->hq ? 1.0f : 0.0f;
+            ui->write(ui->ctl, PORT_HQ, sizeof(float), 0, &pv);
+        }
+        notify_touch(ui, PORT_HQ, false);
+    }
+    start_glow(ui);
 }
 
 void set_enabled(UI* ui, bool on)
@@ -444,11 +509,39 @@ void popup_open(UI* ui)
     p.is_open = true;
     int revert = 0;
     XGetInputFocus(ui->dpy, &p.focus_at_open, &revert);
+    XWindowAttributes wa;
+    p.map_at_open = XGetWindowAttributes(ui->dpy, ui->win, &wa) ? wa.map_state : IsUnmapped;
+    XTranslateCoordinates(ui->dpy, ui->win, ui->root, 0, 0, &p.ax, &p.ay, &child);
     // The keyboard too, so Escape closes the list. A failed keyboard grab
     // leaves the popup usable by mouse.
     XGrabKeyboard(ui->dpy, p.win, False, GrabModeAsync, GrabModeAsync, CurrentTime);
     XFlush(ui->dpy);
     popup_paint(ui);
+}
+
+// The list is a window of the ROOT holding the pointer and keyboard grabs, and X tells a child
+// nothing when its PARENT is unmapped or moved (VisibilityNotify, FocusOut and ConfigureNotify
+// fire nothing either): a host hiding or moving the editor would leave the list floating and
+// the grabs held. So while it is open, our window is watched once per idle turn (two round
+// trips, only while open): no longer in the map state it had when the list opened, or no
+// longer at the same root position, and the list closes.
+// NLSC_UI_POPUP_NO_WATCH=1 restores the list that outlives a hidden editor, for the gate's
+// negative arm only (harness/test_ui_parent.cpp).
+#ifndef NLSC_UI_POPUP_NO_WATCH
+#define NLSC_UI_POPUP_NO_WATCH 0
+#endif
+
+void popup_watch(UI* ui)
+{
+    Popup& p = ui->popup;
+    if (!p.is_open || NLSC_UI_POPUP_NO_WATCH) return;
+    XWindowAttributes wa;
+    int x = 0, y = 0;
+    Window child = 0;
+    if (!XGetWindowAttributes(ui->dpy, ui->win, &wa) || wa.map_state != p.map_at_open ||
+        !XTranslateCoordinates(ui->dpy, ui->win, ui->root, 0, 0, &x, &y, &child) ||
+        x != p.ax || y != p.ay)
+        popup_close(ui);
 }
 
 // Returns true if the dropdown kept the event.
@@ -506,6 +599,95 @@ bool popup_on_event(UI* ui, XEvent* ev)
     }
 }
 
+// --- the decoded images, shared by every instance in the process --------------
+
+// Decoding the bundle's PNGs is most of the cost of opening the editor, and every instance
+// decodes the same files. So they are decoded once, per green, into a process-wide cache under
+// a mutex (an instance opening during another's decode waits for it instead of decoding
+// again). The cache counts its users and is NOT freed when the last one closes: a host that
+// closes and reopens the editor reopens it without decoding. It is freed by the cache's
+// destructor when the process ends, or when a build of this module without -z nodelete is
+// unloaded; no instance is alive then, because a host destroys its UIs before unloading their
+// library. One cache holds one bundle's images: an instance from another bundle, while the
+// cache is in use, decodes its own copy.
+//
+// Negative arms of the gates, for test builds only: NLSC_UI_NO_SHARED_CACHE=1 decodes per
+// instance; NLSC_UI_DROP_ORIGINALS=1 also lets the decoded images go once scaled (a new window
+// size decodes again); NLSC_UI_CACHE_ONE_GREEN=1 keys the cache without the green (the other
+// circuit paints the first one's images); NLSC_UI_KEEP_IMAGES_AT_UNLOAD=1 leaves the cache
+// allocated when the module is unloaded (harness/test_ui_images.cpp, harness/test_ui_unload.cpp).
+#ifndef NLSC_UI_NO_SHARED_CACHE
+#define NLSC_UI_NO_SHARED_CACHE 0
+#endif
+#ifndef NLSC_UI_DROP_ORIGINALS
+#define NLSC_UI_DROP_ORIGINALS 0
+#endif
+#ifndef NLSC_UI_CACHE_ONE_GREEN
+#define NLSC_UI_CACHE_ONE_GREEN 0
+#endif
+#ifndef NLSC_UI_KEEP_IMAGES_AT_UNLOAD
+#define NLSC_UI_KEEP_IMAGES_AT_UNLOAD 0
+#endif
+
+struct ImageCache {
+    std::mutex    mx;
+    std::string   dir;
+    photo::Assets set[2];               // [green]
+    int           users = 0;
+    ~ImageCache()
+    {
+        if (!NLSC_UI_KEEP_IMAGES_AT_UNLOAD) for (auto& a : set) photo::free_assets(a);
+    }
+};
+ImageCache g_images;
+
+// The images of green `g` scaled into ui->scaled at the window's scale, decoded only if this
+// process has not decoded them yet. False when they do not load (the panel draws its placeholder).
+bool scale_images(UI* ui, int g)
+{
+    const double f = asset_scale(ui);
+    if (!NLSC_UI_NO_SHARED_CACHE && !NLSC_UI_DROP_ORIGINALS) {
+        std::lock_guard<std::mutex> lock(g_images.mx);
+        if (g_images.users == 0 && g_images.dir != ui->photo_dir) {
+            for (auto& a : g_images.set) photo::free_assets(a);
+            g_images.dir = ui->photo_dir;
+        }
+        if (g_images.dir == ui->photo_dir) {
+            const int slot = NLSC_UI_CACHE_ONE_GREEN ? 0 : g;
+            photo::Assets& a = g_images.set[slot];
+            if (!a.ok) {
+                photo::free_assets(a);
+                a = photo::load_assets(ui->photo_dir, g, &g_images.set[1 - slot]);
+                if (!a.ok) { photo::free_assets(a); return false; }
+            }
+            if (!ui->cache_user) { ++g_images.users; ui->cache_user = true; }
+            // Scaled under the lock: the decoded surfaces are shared, and a cairo object is not
+            // used from two threads at once.
+            photo::ensure_scaled(ui->scaled, a, f);
+            return true;
+        }
+    }
+    photo::Assets& a = ui->own[g];
+    if (!a.ok) {
+        photo::free_assets(a);
+        a = photo::load_assets(ui->photo_dir, g, &ui->own[1 - g]);
+        if (!a.ok) { photo::free_assets(a); return false; }
+    }
+    photo::ensure_scaled(ui->scaled, a, f);
+    if (NLSC_UI_DROP_ORIGINALS) for (auto& o : ui->own) photo::free_assets(o);
+    return true;
+}
+
+void release_images(UI* ui)
+{
+    if (ui->cache_user) {
+        std::lock_guard<std::mutex> lock(g_images.mx);
+        --g_images.users;
+        ui->cache_user = false;
+    }
+    for (auto& a : ui->own) photo::free_assets(a);
+}
+
 // --- painting ----------------------------------------------------------------
 
 void make_buffers(UI* ui)
@@ -523,6 +705,8 @@ photo::View view_of(const UI* ui)
     v.green = photo::green_of_circuit(nlsc::kVariants[ui->variant].circuit);
     v.lit = ui->lit;
     v.treadle = ui->tread;
+    v.hq_press = ui->hqp;
+    v.hq_glow = ui->glow;
     // In bypass the display is dark, and lights while hovered or
     // while the list is open, so a variant is never changed blind.
     v.display_lit = ui->on || ui->display_hover || ui->popup.is_open;
@@ -535,12 +719,14 @@ void paint(UI* ui)
 {
     if (!ui->cr || !ui->bufcr) return;
     const photo::View v = view_of(ui);
-    if (ui->assets.green != v.green) {       // the variant changed circuit: the other paint
+    // Painting needs only the scaled images. A change of circuit (the other paint) or of window
+    // size scales them again from the decoded ones, which the process keeps (see ImageCache).
+    const double f = asset_scale(ui);
+    const bool failed_here = ui->failed_green == v.green && ui->failed_fit == f;
+    if ((ui->scaled.green != v.green || ui->scaled.f != f) && !failed_here) {
         photo::free_scaled(ui->scaled);
-        photo::free_assets(ui->assets);
-        ui->assets = photo::load_assets(ui->photo_dir, v.green);
+        if (!scale_images(ui, v.green)) { ui->failed_green = v.green; ui->failed_fit = f; }
     }
-    photo::ensure_scaled(ui->scaled, ui->assets, asset_scale(ui));
 
     cairo_t* cr = ui->bufcr;
     cairo_identity_matrix(cr);
@@ -586,8 +772,9 @@ void on_event(UI* ui, XEvent* ev)
             if (b == Button1) {
                 // No zone overlaps another (the scene's projection: DRIVE's and
                 // TONE's centres sit 210 asset px apart with radii summing 151,
-                // and the display bezel ends ~270 px above the treadle), so
-                // the order of the tests does not decide anything.
+                // the HQ button's box is 140 px or more from every knob centre,
+                // radii 81 at most, and the display bezel ends ~270 px above the
+                // treadle), so the order of the tests does not decide anything.
                 const int i = knob_impact(ui, px, py);
                 if (i >= 0) {
                     ui->drag = i;
@@ -597,6 +784,11 @@ void on_event(UI* ui, XEvent* ev)
                 } else if (hit_footswitch(ui, px, py)) {
                     ui->pressed = true;             // it sinks while held down
                     start_treadle(ui);
+                } else if (hit_hq(ui, px, py)) {
+                    // HQ toggles on the press, as on the sibling pedals; it sinks while held
+                    toggle_hq(ui);
+                    ui->hq_held = true;
+                    start_hqp(ui);
                 } else if (hit_dropdown(ui, px, py)) {
                     popup_open(ui);
                 }
@@ -622,6 +814,7 @@ void on_event(UI* ui, XEvent* ev)
                     notify_touch(ui, KNOB_PORT[ui->drag], false);
                     ui->drag = -1;
                 }
+                if (ui->hq_held) { ui->hq_held = false; start_hqp(ui); }
                 if (ui->pressed) {
                     ui->pressed = false;
                     start_treadle(ui);
@@ -638,6 +831,8 @@ void on_event(UI* ui, XEvent* ev)
             break;
 
         case MotionNotify:
+            // the same lost release for the HQ button: it would stay sunk
+            if (ui->hq_held && !(ev->xmotion.state & Button1Mask)) { ui->hq_held = false; start_hqp(ui); }
             if (ui->drag >= 0 && !(ev->xmotion.state & Button1Mask)) {
                 // The button is up and the release never arrived (another
                 // client grabbed the pointer mid-drag): end the drag here, or
@@ -659,7 +854,7 @@ void on_event(UI* ui, XEvent* ev)
             if (ui->display_hover) { ui->display_hover = false; ui->needs_paint = true; }
             break;
 
-        case UnmapNotify:          // the pedal's window hidden: its list goes with it
+        case UnmapNotify:          // our own window unmapped (a hidden PARENT sends nothing: popup_watch sees it)
             popup_close(ui);
             break;
 
@@ -686,11 +881,23 @@ void on_event(UI* ui, XEvent* ev)
 // error handler; NLSC_UI_RESTORE_HANDLERS=1 installs the handler with the first
 // instance and puts the previous one back with the last. Both are for the gates'
 // negative arms only (harness/test_ui_parent.cpp, harness/test_ui_cycle.c).
+// The family shield (shared with src/nls_x_shield.h): with two
+// pedals of the family loaded, both editors closed and the handlers reset to
+// Xlib's default by another library, A reopened and then B: B finds A's handler
+// in place and leaves it, so B's errors reach A's handler, which does not know
+// B's connections. Each editor therefore MARKS its connection (an Xlib context
+// entry under a name every family editor shares, pointing to the error flag of
+// the library that opened it), a handler looks the mark up for a connection it
+// does not know, and every open re-installs ours when the current handler IS
+// Xlib's default. NLSC_UI_FAMILY_SHIELD=0: the shield private to this library.
 #ifndef NLSC_UI_PARENT_VISUAL
 #define NLSC_UI_PARENT_VISUAL 1
 #endif
 #ifndef NLSC_UI_RESTORE_HANDLERS
 #define NLSC_UI_RESTORE_HANDLERS 0
+#endif
+#ifndef NLSC_UI_FAMILY_SHIELD
+#define NLSC_UI_FAMILY_SHIELD 1
 #endif
 
 #if NLSC_UI_PARENT_VISUAL
@@ -702,8 +909,11 @@ int (*g_prev_x_handler)(Display*, XErrorEvent*) = nullptr;
 int  g_ui_instances = 0;
 Display** g_ui_displays = nullptr;
 int  g_ui_ndisplays = 0, g_ui_cap = 0;
-bool g_x_error = false;
+int  g_x_error = 0;                // an int: the family shield's record points to it
 bool g_handler_installed = false;
+#if NLSC_UI_FAMILY_SHIELD
+NlsXsRecord g_xs_record = { 0, &g_x_error };
+#endif
 
 // I/O errors take two handlers in Xlib: the process-wide one runs first and, by
 // default, exit()s the process -- the host; the per-connection exit handler
@@ -735,12 +945,18 @@ bool is_ours(Display* d)
 int ui_x_error(Display* d, XErrorEvent* e)
 {
     if (is_ours(d)) { g_x_error = true; return 0; }
+#if NLSC_UI_FAMILY_SHIELD
+    if (NlsXsRecord* r = nls_xs_find(d)) { *r->flag = 1; return 0; }   // another family editor's connection
+#endif
     return g_prev_x_handler ? g_prev_x_handler(d, e) : 0;
 }
 
 int ui_io_error(Display* d)
 {
     if (is_ours(d)) return 0;
+#if NLSC_UI_FAMILY_SHIELD
+    if (nls_xs_find(d)) return 0;      // its own exit handler marks that editor dead
+#endif
     return g_prev_io_handler ? g_prev_io_handler(d) : 0;
 }
 
@@ -831,7 +1047,30 @@ LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundl
 
 #if NLSC_UI_PARENT_VISUAL
     if (!track_display(ui->dpy, true)) { XCloseDisplay(ui->dpy); delete ui; return nullptr; }
-    if (g_ui_instances++ == 0 && (NLSC_UI_RESTORE_HANDLERS || !g_handler_installed)) {
+#if NLSC_UI_FAMILY_SHIELD
+    // a connection NLSC_UI_SHIELD_CAP's arm left out of the list stays unmarked too (the arm must see it unshielded)
+    if (!(NLSC_UI_SHIELD_CAP > 0 && !is_ours(ui->dpy)) && nls_xs_mark(ui->dpy, &g_xs_record)) {
+        track_display(ui->dpy, false); XCloseDisplay(ui->dpy); delete ui; return nullptr;
+    }
+#endif
+    if (NLSC_UI_FAMILY_SHIELD && !NLSC_UI_RESTORE_HANDLERS) {
+        ++g_ui_instances;
+        // every open: Xlib's own handlers, learned once (setting NULL installs the default and returns what was
+        // there); ours goes in over the default, any other handler (maybe chaining to ours) is left in place
+        static int (*x_default)(Display*, XErrorEvent*) = nullptr;
+        static int (*io_default)(Display*) = nullptr;
+        if (!x_default) { auto c = XSetErrorHandler(nullptr); x_default = XSetErrorHandler(c); }
+        auto cur = XSetErrorHandler(ui_x_error);
+        if (!g_handler_installed || cur == x_default) g_prev_x_handler = cur;
+        else if (cur != ui_x_error) XSetErrorHandler(cur);
+        if (!NLSC_UI_NO_IO_EXIT) {
+            if (!io_default) { auto c = XSetIOErrorHandler(nullptr); io_default = XSetIOErrorHandler(c); }
+            auto cur_io = XSetIOErrorHandler(ui_io_error);
+            if (!g_handler_installed || cur_io == io_default) g_prev_io_handler = cur_io;
+            else if (cur_io != ui_io_error) XSetIOErrorHandler(cur_io);
+        }
+        g_handler_installed = true;
+    } else if (g_ui_instances++ == 0 && (NLSC_UI_RESTORE_HANDLERS || !g_handler_installed)) {
         g_handler_installed = true;
         g_prev_x_handler = XSetErrorHandler(ui_x_error);
         if (!NLSC_UI_NO_IO_EXIT) g_prev_io_handler = XSetIOErrorHandler(ui_io_error);
@@ -912,7 +1151,7 @@ void cleanup(LV2UI_Handle handle)
     auto* ui = static_cast<UI*>(handle);
     popup_close(ui);
     photo::free_scaled(ui->scaled);
-    photo::free_assets(ui->assets);
+    release_images(ui);
     nlsc::ui::free_fonts(ui->fonts_);
     if (ui->bufcr)    cairo_destroy(ui->bufcr);
     if (ui->buf)      cairo_surface_destroy(ui->buf);
@@ -926,6 +1165,9 @@ void cleanup(LV2UI_Handle handle)
         // server round trip on a connection that had its I/O error, and frees
         // the Display and its socket.
         if (live) XSync(ui->dpy, False);
+#if NLSC_UI_PARENT_VISUAL && NLSC_UI_FAMILY_SHIELD
+        nls_xs_unmark(ui->dpy);
+#endif
         XCloseDisplay(ui->dpy);
 #if NLSC_UI_PARENT_VISUAL
         track_display(ui->dpy, false);
@@ -956,6 +1198,10 @@ void port_event(LV2UI_Handle handle, uint32_t port, uint32_t buffer_size,
         case PORT_TONE:    if (!ui->knob_dirty[2]) ui->knob[2] = clamp01(v); break;
         case PORT_ENABLED:
             if ((v >= 0.5f) != ui->on) { ui->on = (v >= 0.5f); start_fade(ui); }
+            break;
+        case PORT_HQ:
+            if (NLSC_UI_HQ_MUTANT == 2) return;
+            if ((v >= 0.5f) != ui->hq) { ui->hq = (v >= 0.5f); start_glow(ui); }
             break;
         case PORT_VARIANT: {
             // Clamped as a float first: int() of a value past INT_MAX is UB.
@@ -1002,6 +1248,7 @@ int ui_idle(LV2UI_Handle handle)
         XGetInputFocus(ui->dpy, &fw, &revert);
         if (fw != ui->popup.focus_at_open) popup_close(ui);
     }
+    popup_watch(ui);
     flush_knobs(ui);
     if (animate(ui, seconds_now())) ui->needs_paint = true;
     if (ui->needs_paint) {

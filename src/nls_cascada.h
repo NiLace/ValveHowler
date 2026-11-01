@@ -49,10 +49,8 @@
 // The coefficients are discretised at one concrete rate; this picks the set.
 // With nothing defined the default set is used. The filters the plugin runs
 // are rebuilt at the real rate in `prepare()`.
-//   -DNLSC_CASC_KHZ=192  ->  4x      -DNLSC_CASC_KHZ=96  ->  2x
-#if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 96
-#  include "nls_e234_coef_96k.h"
-#elif defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
+//   -DNLSC_CASC_KHZ=192  ->  4x      (none)  ->  8x
+#if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
 #  include "nls_e234_coef_192k.h"
 #else
 #  include "nls_e234_coef.h"
@@ -62,9 +60,7 @@
 // (`J::N3_B`, `tone::`, `level::`) and discretised at the real rate in
 // `prepare()`. No symbol from this header's `rail::` namespace is read, so
 // this selection only picks an unused initialiser.
-#if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 96
-#  include "nls_rail_n3_96k.h"
-#elif defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
+#if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
 #  include "nls_rail_n3_192k.h"
 #else
 #  include "nls_rail_n3.h"
@@ -74,15 +70,15 @@
 #ifndef NLSC_E4_OPEN_BASE
 #  define NLSC_E4_OPEN_BASE 1
 #endif
-// `NLSC_E4_SUB_808`: on the 808, stage 4 solves Q2's subsystem with a scalar
+// `NLSC_E4_SUB_OD8`: on the OD-8, stage 4 solves Q2's subsystem with a scalar
 // Newton instead of the tabulated waveshaper, so Q2's base is driven by the
 // current the subsystem computes rather than by a fitted impedance.
 // `=0` returns to the tabulated waveshaper.
-#ifndef NLSC_E4_SUB_808
-#  define NLSC_E4_SUB_808 1
+#ifndef NLSC_E4_SUB_OD8
+#  define NLSC_E4_SUB_OD8 1
 #endif
-#ifndef NLSC_E4_SUB_V9RI
-#  define NLSC_E4_SUB_V9RI 1
+#ifndef NLSC_E4_SUB_OD9
+#  define NLSC_E4_SUB_OD9 1
 #endif
 // THE `ib` LOOP, CLOSED INSTEAD OF DELAYED. See `SubQ2::process_loop`
 // and `OpenBaseLevel::parte_sin_ib`. At 0 it falls back to a one-sample
@@ -130,7 +126,7 @@
 // ~0,09 at the worst `lvl` (kz = −24 080 Ω at mid-travel, 24x the `lvl` 0
 // value), so two passes leave the term at ~1e-4 of its 2,4 mV. One pass
 // leaves ~9 % of it: on the full knob grid against ngspice (36 cells, 4x
-// rate, the 808 variant) 25 of 36 cells rise above −60 dB (worst −55,5). A
+// rate, the OD-8 variant) 25 of 36 cells rise above −60 dB (worst −55,5). A
 // per-axis sweep does not show it; the worst case is in the knob interaction.
 #ifndef NLSC_E4_IEQ_CEILING
 #  define NLSC_E4_IEQ_CEILING 0
@@ -178,7 +174,7 @@
 #ifndef NLSC_E4_CACHE_VC_LO
 #  define NLSC_E4_CACHE_VC_LO (-0.030)
 #endif
-// The upper edge covers the 808 at 2,0 V of input with the 8-node axis.
+// The upper edge covers the OD-8 at 2,0 V of input with the 8-node axis.
 #ifndef NLSC_E4_CACHE_VC_HI
 #  define NLSC_E4_CACHE_VC_HI (+0.240)
 #endif
@@ -229,12 +225,10 @@
 // THE SECOND BANK. Included ALWAYS, not under `#if`: the variant is
 // chosen LIVE, so both banks of the current rate must be compiled at once.
 // (`nls_stage1.h` already brings its own plus `fixed`/`reposo`.)
-#if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 96
-#  include "nls_e234_coef_v9ri_96k.h"
-#elif defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
-#  include "nls_e234_coef_v9ri_192k.h"
+#if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
+#  include "nls_e234_coef_od9_192k.h"
 #else
-#  include "nls_e234_coef_v9ri_384k.h"
+#  include "nls_e234_coef_od9_384k.h"
 #endif
 #include "nls_stage2.h"
 #include "nls_tono.h"
@@ -249,8 +243,8 @@
 
 namespace nlsc {
 inline constexpr bool kOpenBase = (NLSC_E4_OPEN_BASE != 0);
-inline constexpr bool kSubIn808  = (NLSC_E4_SUB_808  != 0);
-inline constexpr bool kSubInV9ri = (NLSC_E4_SUB_V9RI != 0);
+inline constexpr bool kSubInOd8  = (NLSC_E4_SUB_OD8  != 0);
+inline constexpr bool kSubInOd9 = (NLSC_E4_SUB_OD9 != 0);
 inline constexpr bool kClosedLoop = (NLSC_E4_CLOSED_LOOP != 0);
 inline constexpr bool kGsInSub    = (NLSC_E4_GS_IN_SUB != 0);
 }
@@ -296,19 +290,19 @@ public:
     // `g1_` (the LEVEL pot's network) is parametric in `lvl`. The rest point
     // needs no parametrisation: `lvl` does not move it, because C8 blocks DC
     // between the pot and Q2's base. See `nls_nivel.h`.
-    // THE VARIANT. The physical difference between the 808 and the 9/9RI lives
+    // THE VARIANT. The physical difference between the OD-8 and the OD-9 lives
     // here: `R14` (series) and `R15` (the output load, after the coupling cap).
     // Both share Q2's emitter resistor (10 k) and therefore its quiescent point;
     // what moves is the load on `n17` and the output divider `E4G2`, 0,10 dB, a
     // very subtle difference.
     // `kWS2` is read per sample, so it is copied; the filters are read only in
     // `prepare()`, so choosing the table suffices.
-    static_assert(fixed::kE4GS_NB == fixed_v9ri::kE4GS_NB &&
-                  fixed::kE4GS_NA == fixed_v9ri::kE4GS_NA &&
-                  fixed::kE4G2_NB == fixed_v9ri::kE4G2_NB &&
-                  fixed::kE4G2_NA == fixed_v9ri::kE4G2_NA,
+    static_assert(fixed::kE4GS_NB == fixed_od9::kE4GS_NB &&
+                  fixed::kE4GS_NA == fixed_od9::kE4GS_NA &&
+                  fixed::kE4G2_NB == fixed_od9::kE4G2_NB &&
+                  fixed::kE4G2_NA == fixed_od9::kE4G2_NA,
                   "both stage-4 banks must share the same filter orders");
-    static_assert(e234::kWS2_N <= kWSMax && e234_v9ri::kWS2_N <= kWSMax,
+    static_assert(e234::kWS2_N <= kWSMax && e234_od9::kWS2_N <= kWSMax,
                   "kWSMax is too small for Q2's waveshaper");
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -316,7 +310,7 @@ public:
     // ═══════════════════════════════════════════════════════════════════════
     //
     // The TABULATED waveshaper is a static function of `n19`, and for the
-    // 9/9RI variant that is not enough: against the reference `n17` under real
+    // OD-9 variant that is not enough: against the reference `n17` under real
     // signal, the polynomial reaches −31,1 dB and this subsystem −70,0 dB. The
     // static curve extracted with a sine sweep and the one under the whole
     // chain's signal differ by up to 23 mV in the cutoff region: a model is
@@ -340,8 +334,8 @@ public:
         static constexpr double kR13 = 10.0e3;
         static constexpr double kC9  = 10.0e-6;
         static constexpr double kVCC = 9.0;
-        // The follower's gain, for the predictor: 0,94 on the 9/9RI and 0,98 on
-        // the 808. An intermediate value serves both, since it only decides where
+        // The follower's gain, for the predictor: 0,94 on the OD-9 and 0,98 on
+        // the OD-8. An intermediate value serves both, since it only decides where
         // the Newton starts.
         static constexpr double kGainSeg = 0.96;
         // The Newton's iteration budget (see `NLSC_E4_ITER`).
@@ -419,8 +413,8 @@ public:
 #if NLSC_E4_CHARGES == 2
             return gh_ * ((jbe_.cj0 * vbe - qbe_ant_) + (jbc_.cj0 * vbc - qbc_ant_));
 #elif NLSC_E4_CHARGES
-            const mna::Engine::QOut o =
-                mna::Engine::bjt(qm_, jbe_, jbc_, vbe, vbc, true);
+            const mna::Devices::QOut o =
+                mna::Devices::bjt(qm_, jbe_, jbc_, vbe, vbc, true);
             return gh_ * ((o.qbe - qbe_ant_) + (o.qbc - qbc_ant_));
 #else
             (void)vbe; (void)vbc; return 0.0;
@@ -464,8 +458,8 @@ public:
 #if NLSC_E4_CHARGES == 2
             advance_charges(jbe_.cj0 * vbe, jbc_.cj0 * vbc);
 #else
-            const mna::Engine::QOut o =
-                mna::Engine::bjt(qm_, jbe_, jbc_, vbe, vbc, true);
+            const mna::Devices::QOut o =
+                mna::Devices::bjt(qm_, jbe_, jbc_, vbe, vbc, true);
             advance_charges(o.qbe, o.qbc);
 #endif
         }
@@ -475,7 +469,7 @@ public:
             qbe_ant_ = jbe_.cj0 * (n19_q - n17_q);
             qbc_ant_ = jbc_.cj0 * (n19_q - kVCC);
 #else
-            const mna::Engine::QOut o = mna::Engine::bjt(
+            const mna::Devices::QOut o = mna::Devices::bjt(
                 qm_, jbe_, jbc_, n19_q - n17_q, n19_q - kVCC, true);
             qbe_ant_ = o.qbe; qbc_ant_ = o.qbc;
 #endif
@@ -538,10 +532,10 @@ public:
 #ifndef NLSC_CJC_SCALE
 #define NLSC_CJC_SCALE 1.0
 #endif
-            jbe_.init(mna::Engine::depletion_cap(u_rest_ - n17_rest, qm_.CJE, qm_.VJE,
+            jbe_.init(mna::Devices::depletion_cap(u_rest_ - n17_rest, qm_.CJE, qm_.VJE,
                                  qm_.MJE, qm_.FC) * double(NLSC_CJC_SCALE),
                       qm_.VJE, qm_.MJE, qm_.FC);
-            jbc_.init(mna::Engine::depletion_cap(u_rest_ - kVCC, qm_.CJC, qm_.VJC,
+            jbc_.init(mna::Devices::depletion_cap(u_rest_ - kVCC, qm_.CJC, qm_.VJC,
                                  qm_.MJC, qm_.FC) * double(NLSC_CJC_SCALE),
                       qm_.VJC, qm_.MJC, qm_.FC);
             // On a knob move (no reinit) `cj0` changes here while `qbe_ant_`/`qbc_ant_`
@@ -573,15 +567,6 @@ public:
         static constexpr int kCN2 = NLSC_E4_CACHE_N2;
         static constexpr int kCIt = NLSC_E4_CACHE_IT;
 
-        long out_of_box() const { return out_of_box_; }
-        // Per axis too: clipping the `ieq` axis (which enters linearly) is not
-        // the same as clipping `n19`'s. `excess_*` is in NODES, i.e. grid steps.
-        long outside_p()   const { return out_p_; }
-        long outside_ieq() const { return out_i_; }
-        double excess_p()   const { return excess_p_; }
-        double excess_ieq() const { return excess_i_; }
-        double w_min() const { return w_min_; }   // in NODES: 0 .. kCN2-1 is inside
-        double w_max() const { return w_max_; }
 
 
 
@@ -591,8 +576,8 @@ public:
         {
             const double vbc = n19 - kVCC;
             for (int it = 0; it < 200; ++it) {
-                const mna::Engine::QOut o =
-                    mna::Engine::bjt(qm_, jbe_, jbc_, n19 - x, vbc, false);
+                const mna::Devices::QOut o =
+                    mna::Devices::bjt(qm_, jbe_, jbc_, n19 - x, vbc, false);
                 const double f  = (o.ib + o.ic) - x * g13_ - (x * geq_ - ieq);
                 const double df = -(o.dic_be + o.dib_be) - g13_ - geq_;
                 double step = f / df;
@@ -601,7 +586,7 @@ public:
                 x -= step;
                 if (step < 1e-15 && step > -1e-15) break;
             }
-            ib = mna::Engine::bjt(qm_, jbe_, jbc_, n19 - x, vbc, false).ib;
+            ib = mna::Devices::bjt(qm_, jbe_, jbc_, n19 - x, vbc, false).ib;
         }
 
         // The CLOSED system (design A): both unknowns at once, with
@@ -610,8 +595,8 @@ public:
                                 double& x, double& v, double& ib) const
         {
             for (int it = 0; it < 200; ++it) {
-                const mna::Engine::QOut o =
-                    mna::Engine::bjt(qm_, jbe_, jbc_, v - x, v - kVCC, false);
+                const mna::Devices::QOut o =
+                    mna::Devices::bjt(qm_, jbe_, jbc_, v - x, v - kVCC, false);
                 const double gm = o.dib_be + o.dic_be;
                 const double gcb = o.dib_bc + o.dic_bc;
                 const double f1 = (o.ib + o.ic) - x * g13_ - (x * geq_ - ieq);
@@ -631,7 +616,7 @@ public:
                 x -= px; v -= pv;
                 if (px < 1e-15 && px > -1e-15 && pv < 1e-15 && pv > -1e-15) break;
             }
-            ib = mna::Engine::bjt(qm_, jbe_, jbc_, v - x, v - kVCC, false).ib;
+            ib = mna::Devices::bjt(qm_, jbe_, jbc_, v - x, v - kVCC, false).ib;
         }
 
         void build_cache(double n19_rep, double n17_rep, double kz)
@@ -797,12 +782,6 @@ public:
                 advance_cache(NLSC_E4_CACHE_NODES_PER_SAMPLE);
 #endif
         }
-        bool cache_pending() const { return cache_pending_; }
-        long cache_nodes_left() const
-        {
-            if (!cache_pending_) return 0;
-            return long(kCN2 - cur_k_ - 1) * long(kCN1) + long(kCN1 - cur_j_);
-        }
 
         // IS THIS POINT INSIDE? Asked before reading; outside it falls to the
         // Newton instead of clipping. A table is an accelerator, not a substitute:
@@ -882,8 +861,6 @@ public:
         // The PHYSICAL base current: static + displacement. It is what
         // leaves the block towards `Z(s;lvl)`, where the null measures it.
         double ib() const { return ib_ + idisp_; }
-        double ib_static() const { return ib_; }
-        double idisp() const { return idisp_; }
 #else
         double ib() const { return ib_; }
 #endif
@@ -900,7 +877,7 @@ public:
             double ib = 0.0;
             for (int k = 0; k < 4; ++k) {
                 const double u = n19_q - rb_ * ib;
-                ib = mna::Engine::bjt(qm_, jbe_, jbc_, u - n17_q,
+                ib = mna::Devices::bjt(qm_, jbe_, jbc_, u - n17_q,
                                       u - kVCC, false).ib;
             }
             return ib;
@@ -977,8 +954,8 @@ public:
             // buys nothing and costs the cascade its speed advantage.
             int it = 0;
             for (; it < kMaxIter; ++it) {
-                const mna::Engine::QOut o =
-                    mna::Engine::bjt(qm_, jbe_, jbc_, n19_abs - x_, vbc, false);
+                const mna::Devices::QOut o =
+                    mna::Devices::bjt(qm_, jbe_, jbc_, n19_abs - x_, vbc, false);
                 const double f  = (o.ib + o.ic) - x_ * g13_ - (x_ * geq_ - ieq);
                 const double df = -(o.dic_be + o.dib_be) - g13_ - geq_;
                 double step = f / df;
@@ -999,8 +976,8 @@ public:
             {
                 // `kExactCharges`: this evaluation is already made, so on the Newton path
                 // the charges are free.
-                const mna::Engine::QOut o =
-                    mna::Engine::bjt(qm_, jbe_, jbc_, n19_abs - x_, vbc, kExactCharges);
+                const mna::Devices::QOut o =
+                    mna::Devices::bjt(qm_, jbe_, jbc_, n19_abs - x_, vbc, kExactCharges);
                 ib_ = o.ib;
 #if NLSC_E4_CHARGES == 2
                 advance_charges_from(n19_abs - x_, vbc);
@@ -1108,8 +1085,8 @@ public:
             x_ += kGainSeg * (v - n19_prev_);
             int it = 0;
             for (; it < kMaxIter; ++it) {
-                const mna::Engine::QOut o =
-                    mna::Engine::bjt(qm_, jbe_, jbc_, v - x_, v - kVCC, false);
+                const mna::Devices::QOut o =
+                    mna::Devices::bjt(qm_, jbe_, jbc_, v - x_, v - kVCC, false);
                 const double gm = o.dib_be + o.dic_be;       // d(ib+ic)/d(vbe)
                 const double gc = o.dib_bc + o.dic_bc;       // d(ib+ic)/d(vbc)
                 const double f1 = (o.ib + o.ic) - x_ * g13_ - (x_ * geq_ - ieq);
@@ -1148,8 +1125,8 @@ public:
             if (it == kMaxIter) ++unconverged_;
             ++samples_;
             {
-                const mna::Engine::QOut o =
-                    mna::Engine::bjt(qm_, jbe_, jbc_, v - x_, v - kVCC, kExactCharges);
+                const mna::Devices::QOut o =
+                    mna::Devices::bjt(qm_, jbe_, jbc_, v - x_, v - kVCC, kExactCharges);
                 ib_ = o.ib;
 #if NLSC_E4_CHARGES == 2
                 advance_charges_from(v - x_, v - kVCC);
@@ -1172,7 +1149,7 @@ public:
 
     private:
         mna::QModel qm_{};
-        mna::Engine::Junc jbe_{}, jbc_{};   // no charges: `with_charges = false`
+        mna::Devices::Junc jbe_{}, jbc_{};   // no charges: `with_charges = false`
         double g13_ = 0.0, geq_ = 0.0, inv_gc_ = 0.0, k_vc_ = 0.0;
         double x_ = 0.0, vc_ = 0.0, i_prev_ = 0.0, n19_prev_ = 0.0;
         double ib_ = 0.0;
@@ -1294,32 +1271,18 @@ public:
     // waveshaper must evaluate in its fit frame and its output return to the
     // current one. See `nls_reposo_drive.h`. At zero offset nothing changes.
     // `kFit_*` belongs to the variant: it is the rest Q2's curve was fitted at,
-    // and between the 808 and the 9/9RI it differs by 998 mV.
+    // and between the OD-8 and the OD-9 it differs by 998 mV.
     void set_rest(double q_n19, double q_n17)
     {
         off_in_  = q_n19 - fit_n19_;
         off_out_ = q_n17 - fit_n17_;
         q_n19_abs_ = q_n19;
         q_n17_     = q_n17;
-#if defined(NLSC_E4_Q_N17_TRIM)
-        // DIAGNOSTIC: shifts the tabulated rest of `n17` by a fixed amount, to
-        // test whether a start-up offset in `w = sub_.process_loop(...) - q_n17_`
-        // comes from a mismatch between the tabulated and the solved rest.
-        q_n17_ += (NLSC_E4_Q_N17_TRIM);
-#endif
     }
 
     // The netlist values the VARIANT changes, for the subsystem.
     void set_resistances(double r15, double r14) { r15_ = r15; r14_ = r14; }
 
-    // PROBE: the last sample's absolute `n17`. `w_` is stored by `process()`.
-    // The frame depends on the path: on the tabulated path `w_` is the
-    // waveshaper's output in its fit frame; on the subsystem path it is
-    // `n17 − q_n17_`, a deviation against the current rest.
-    double n17_abs() const { return (use_sub_ ? q_n17_ : fit_n17_) + w_; }
-
-    double ws_umin() const { return umin_; }
-    double ws_umax() const { return umax_; }
 
     // The current rest's steady state — see `ParamFilter::preset_dc`.
     void startup()
@@ -1331,40 +1294,13 @@ public:
         g2_.preset_dc(gs_.preset_dc(poly(off_in_) - off_out_ * rest::kOffOutput));
     }
 
-    // The guard's statistics zero AFTER the pre-run: otherwise they count
-    // the startup transient, which is not what is being judged.
-    void reset_stats() { out_of_range_ = 0; u_min_ = 1e9; u_max_ = -1e9; }
-
-    long out_of_range() const { return out_of_range_; }
-    double u_min() const { return u_min_; }
-    double u_max() const { return u_max_; }
-#if NLSC_E4_CACHE
-    // The cache box's counters, published outward, so an edge is never hit
-    // silently.
-    long out_of_box() const { return sub_.out_of_box(); }
-    long outside_p()   const { return sub_.outside_p(); }
-    long outside_ieq() const { return sub_.outside_ieq(); }
-    double excess_p()   const { return sub_.excess_p(); }
-    double excess_ieq() const { return sub_.excess_ieq(); }
-    double w_min() const { return sub_.w_min(); }
-    double w_max() const { return sub_.w_max(); }
-#endif
 
 
-    // Subsystem Newton observability (see `SubQ2::process`).
-    long newton_escapes() const { return sub_.unconverged_; }
-    long newton_samples() const { return sub_.samples_; }
     // The cache's slice filling lives in the subsystem; this only forwards.
 #if NLSC_E4_CACHE
     void defer_fill(bool v)        { sub_.defer_fill(v); }
     bool advance_cache(int nodes)        { return sub_.advance_cache(nodes); }
-    bool cache_pending() const        { return sub_.cache_pending(); }
-    long cache_nodes_left() const  { return sub_.cache_nodes_left(); }
 #endif
-    // PROBE: the `ib` loop's violation on the last sample, in volts. With the
-    // loop closed it sits at the Newton's floor; with `ib` delayed it equals
-    // `kz·Δib`.
-    double loop_resid() const { return loop_resid_; }
 
 private:
     double poly(double u) const
@@ -1388,7 +1324,7 @@ private:
     long out_of_range_ = 0;
 
     // COPY of the active variant's waveshaper: read PER SAMPLE. The
-    // constructor leaves the 808's.
+    // constructor leaves the OD-8's.
     double last_w_ = 0.0;   // the loop's own `w`, read back by `prepare()`
     double ws2_[kWSMax] = {0.0};
     int    ws2_n_ = e234::kWS2_N;
@@ -1398,7 +1334,7 @@ private:
     double loop_resid_ = 0.0; // violation of `n19 = a0 + kz·ib`, in volts
     double ib_prev_ = 0.0, ib0_ = 0.0;   // base current and its rest
     double q_n19_abs_ = 0.0, q_n17_ = 0.0;
-    double r15_ = 10.0e3, r14_ = 100.0;   // 808 by default: R15 10k, R14 100
+    double r15_ = 10.0e3, r14_ = 100.0;   // OD-8 by default: R15 10k, R14 100
     bool   use_sub_ = false;              // set by `set_bank`
     SubQ2  sub_{};
     double fit_n19_ = rest::kFit_n19;
@@ -1431,15 +1367,15 @@ constexpr bool nlsc_coef_pair_is_identity(const double (&b)[3][1],
     return true;
 }
 static_assert(!nlsc_coef_pair_is_identity(fixed::kE2C_B, fixed::kE2C_A),
-              "NLSC_CASC_CORR is ON but E2C is the IDENTITY filter for the 808 set: "
+              "NLSC_CASC_CORR is ON but E2C is the IDENTITY filter for the OD-8 set: "
               "the coefficients come from the generator's OFF branch, so this would "
               "measure nothing. The route back exists: measure stage 2's response, "
               "put the candidate where the generator reads it and re-run the "
               "generator to emit a real E2C -- by hand, deliberately, because that "
               "changes the generated coefficient headers.");
-static_assert(!nlsc_coef_pair_is_identity(fixed_v9ri::kE2C_B, fixed_v9ri::kE2C_A),
-              "NLSC_CASC_CORR is ON but E2C is the IDENTITY filter for the 9/9RI set: "
-              "same cause and same fix as the 808 assertion above.");
+static_assert(!nlsc_coef_pair_is_identity(fixed_od9::kE2C_B, fixed_od9::kE2C_A),
+              "NLSC_CASC_CORR is ON but E2C is the IDENTITY filter for the OD-9 set: "
+              "same cause and same fix as the OD-8 assertion above.");
 #endif
 
 class Cascade4 {
@@ -1463,15 +1399,6 @@ public:
     int    belt_need_ = kRescue;   // doubled by each rescue (see belt_)
 public:
     long   belt_broken_ = 0;   // samples with the output broken
-    long newton_escapes() const { return e4_.newton_escapes(); }
-    // Stage 2's probes, forwarded outwards.
-    long   e2_unconverged()   const { return e2_.unconverged(); }
-    double e2_v5() const { return e2_.probe_v5(); }
-    double e2_v7() const { return e2_.probe_v7(); }
-    double e2_v2() const { return e2_.probe_v2(); }
-    double e2_w_extreme() const { return e2_.w_extreme(); }
-    long newton_samples() const { return e4_.newton_samples(); }
-    double loop_resid() const { return e4_.loop_resid(); }
     // Defers the cache fills. Only the plugin core turns it on: it is the
     // only caller that knows `prepare()` reaches this from the audio thread.
     // Other callers keep the table built at once in `prepare()`.
@@ -1508,46 +1435,12 @@ public:
         (void)v;
 #endif
     }
-    // Stage 2 table observability, forwarded so that "it never fires" can be
-    // checked from outside.
-    long table_out_of_box() const
-    {
-#if NLSC_E2_TABLE
-        return e2_.table_out_of_box();
-#else
-        return 0;
-#endif
-    }
-    long table_fill_unconverged() const
-    {
-#if NLSC_E2_TABLE
-        return e2_.table_fill_unconverged();
-#else
-        return 0;
-#endif
-    }
     bool advance_cache(int nodes = NLSC_E4_CACHE_NODES_PER_BLOCK)
     {
 #if NLSC_E4_CACHE
         return e4_.advance_cache(nodes);
 #else
         (void)nodes; return false;
-#endif
-    }
-    bool cache_pending() const
-    {
-#if NLSC_E4_CACHE
-        return e4_.cache_pending();
-#else
-        return false;
-#endif
-    }
-    long cache_nodes_left() const
-    {
-#if NLSC_E4_CACHE
-        return e4_.cache_nodes_left();
-#else
-        return 0;
 #endif
     }
     long   rescues_ = 0;         // times it returned to rest
@@ -1595,14 +1488,14 @@ public:
 
         // THE REST FOLLOWS THE KNOB. See `nls_reposo_drive.h`: the gain pot moves
         // `n7` by 6,09 mV and `VR` by 1,90 mV between the ends. Evaluated once,
-        // here. And the rest is the variant's: between the 808 and the 9/9RI `n17`
+        // here. And the rest is the variant's: between the OD-8 and the OD-9 `n17`
         // moves +998 mV and `n19` +947 mV, a volt of DC the rail loop would
         // otherwise integrate.
         q_vr_  = rest::ev(J::Rvr,  gain);
         q_n3_  = rest::ev(J::Rn3,  gain);
         q_n4_  = rest::ev(J::Rn4,  gain);
         q_n7_  = rest::ev(J::Rn7,  gain);
-        q_n11_ = q_vr_;   // `n11` is opamp B's output, resting at VR
+        q_n11_ = q_vr_;   // `n11` is the C3-R5 junction (stage 2), resting at VR
         q_n14_ = rest::ev(J::Rn14, gain);
         q_n19_ = rest::ev(J::Rn19, gain);
         const double q_n6  = rest::ev(J::Rn6,  gain);
@@ -1613,8 +1506,7 @@ public:
         // The output's quiescent point is the variant's, like every other q_*.
         q_out_ = J::Q_out;
 
-        // PROBE: upper bound of correcting stage 1's rest, sibling of
-        // `NLSC_SHIFT_N19`. This stage's rest is evaluated once in `prepare()`, from
+        // PROBE: upper bound of correcting stage 1's rest. This stage's rest is evaluated once in `prepare()`, from
         // the knob alone, while under signal the rest displaces. The two axes are
         // separate because the residual means differ in sign (`n3` -0,4896 mV,
         // `n4` +0,1255), so one common offset cannot correct both. Undefined, the
@@ -1777,18 +1669,7 @@ public:
         rail_ = q_vr_ + dvr_;      // one sample of delay
 #endif
         const Outputs s = process_(in);
-        // The next sample's rail, from what just left each stage. The CURRENTS
-        // each node feeds the rail are summed and the node's impedance applies
-        // ONCE: `dVR·(Gtot + s·C11) = Σ n_k/R_k`, the node's exact KCL. All three
-        // rate banks carry `kVRA`/`kVRB` as currents (no pole); applying the rail
-        // pole inside each contribution as well would count it twice and diverge.
-        // `NLSC_CASC_RAIL_COMPOSED` belongs to an incompatible bank convention and
-        // is rejected with `#error`, since with these banks it would silently give a
-        // wrong model.
-#if defined(NLSC_CASC_RAIL_COMPOSED)
-#  error "NLSC_CASC_RAIL_COMPOSED assumes kVRA/kVRB are voltages, but the banks carry them as currents at all three rates: this branch would apply the rail pole once too few and give a wrong model without any error."
-#endif
-        dvr_ = kVrG * vrp_.process(kVrA * vra_.process(s.n7 - q_n7_)
+        dvr_ = vrp_.process(vra_.process(s.n7 - q_n7_)
                           + vrb_.process(s.n14 - q_n14_)
                           + g_n4_  * (s.n4 - q_n4_)
                           + g_n11_ * (e2_.n11() - q_n11_)
@@ -1879,25 +1760,6 @@ private:
     double q_n7_  = e234::kQ_n7,  q_n11_ = e234::kQ_n11, q_n14_ = e234::kQ_n14;
     double q_out_ = e234::kQ_out;
     double q_n19_ = e234::kQ_n19;
-    // MEASUREMENT SCALARS on the rail loop, both 1,0 by default.
-    // `NLSC_VR_GAIN` scales the whole loop's gain, to test whether a rail DC
-    // shortfall is a gain error (constant over level) rather than a missing
-    // nonlinear term.
-    // `NLSC_VR_GA` scales `n7`'s term alone (the `n9` branch via `R8`): `kVRA`
-    // comes from `(n9/n7)/R8` measured with VR pinned (0,9091 = 10/11), while
-    // with VR free the DC quotient is 0,9643, because VR moves with `n7`.
-    static constexpr double kVrA =
-#ifdef NLSC_VR_GA
-        NLSC_VR_GA;
-#else
-        1.0;
-#endif
-    static constexpr double kVrG =
-#ifdef NLSC_VR_GAIN
-        NLSC_VR_GAIN;
-#else
-        1.0;
-#endif
     double rail_ = e234::kQ_vr;
 
 
@@ -1917,7 +1779,7 @@ private:
     // bank takes the closed loop, stage 4 never reads it, so it is not computed.
     inline double rail_to_n19(double drv)
     {
-        if constexpr (kSubIn808 && kSubInV9ri && kOpenBase && kClosedLoop) {
+        if constexpr (kSubInOd8 && kSubInOd9 && kOpenBase && kClosedLoop) {
             (void)drv;
             return 0.0;
         } else {
@@ -1941,7 +1803,6 @@ private:
     // deviations over rest, which is a stage's value at rest.
     double seg_n4_ = 0.0, seg_n7_ = 0.0, seg_n14_ = 0.0;
 #endif
-    FixedFilter<fixed::kN3_NB, fixed::kN3_NA> rn3_;
     // The rail's path into `n14` depends on the tone knob: the rail enters
     // through `R8` before the tone network, so what it injects is filtered by
     // the knob. `VR -> n3`, instead, does not depend on drive (−101 to −113 dB
@@ -1967,7 +1828,6 @@ private:
     FixedFilter<fixed::kVRC_NB, fixed::kVRC_NA> vrc_;
     FixedFilter<fixed::kVRP_NB, fixed::kVRP_NA> vrp_;
 
-    Stage1 e1_;
 #if NLSC_E1_PHYS
     Stage1Phys e1p_;
 #endif

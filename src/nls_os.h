@@ -18,7 +18,6 @@
 
 #pragma once
 
-#include <cstdio>   // only for `warn_if_clamped` (see its comment)
 #include <cmath>
 #include <cstring>
 
@@ -127,8 +126,7 @@ public:
     {
         // Clamped from above, and the clamp is recorded in a member
         // (`clamped()`) rather than printed: no I/O belongs in the plugin's
-        // code path (`fprintf` takes the FILE lock and may block). A caller
-        // that may print reports it with `warn_if_clamped()`.
+        // code path (`fprintf` takes the FILE lock and may block).
         clamped_ = (N > kMaxOS) || (taps_per_phase > kMaxTaps);
         if (N > kMaxOS) N = kMaxOS;
         if (taps_per_phase > kMaxTaps) taps_per_phase = kMaxTaps;
@@ -173,14 +171,9 @@ public:
         reset();
     }
 
-    int factor()  const { return n_; }
     // Total round-trip delay, in base-rate samples.
     int latency() const { return (n_ == 1) ? 0 : (tf_ - 1); }
 
-    // Whether the last `prepare()` had to clamp the factor or the taps. If
-    // true, the oversampler is not running at the requested factor; a caller
-    // that takes the factor from user input must check it.
-    bool clamped() const { return clamped_; }
 
     void reset()
     {
@@ -281,19 +274,5 @@ private:
 };
 
 
-// Reports a clamped factor on stderr. It lives outside `prepare()` so that
-// the plugin's code path contains no I/O: being `inline` and never called by
-// the plugin, it is not emitted into the plugin binary, which therefore
-// references no `fprintf`. A caller that takes the factor from user input
-// should call it, so a clamp is never silent.
-inline bool warn_if_clamped(const Oversampler& ovs, int requested, const char* who)
-{
-    if (!ovs.clamped()) return false;
-    std::fprintf(stderr,
-        "%s: requested oversampling factor %d exceeds the cap %d and has been "
-        "clamped; the output is not at the requested factor.\n",
-        who, requested, Oversampler::kMaxOS);
-    return true;
-}
 
 } // namespace nlsc

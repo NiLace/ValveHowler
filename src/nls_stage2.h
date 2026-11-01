@@ -35,7 +35,7 @@
 //   two, which would be 4.65 mV of DC fed into the chain.
 //
 // The diode model is the same object the DK engine uses (`mna::DModel` +
-// `mna::Engine::diode`), junction charge included, with the same trapezoidal
+// `mna::Devices::diode`), junction charge included, with the same trapezoidal
 // discretisation, so the two engines cannot differ by their device model.
 
 #pragma once
@@ -99,6 +99,14 @@
 // At guitar level the box never fires, so it does not change normal output.
 #ifndef NLSC_E2_TABLE_BOX
 #define NLSC_E2_TABLE_BOX 1
+#endif
+// Holds the op-amp's pole node inside the supply (njm4558.sub v2.1) and sends a table sample that clips to the
+// Newton solve. 0 only for the table box's negative arm (build/abuso_sin_caja).
+#ifndef NLSC_E2_POLE_PIN
+#define NLSC_E2_POLE_PIN 1
+#endif
+#ifndef NLSC_E2_TABLE_CLIP_FALLBACK
+#define NLSC_E2_TABLE_CLIP_FALLBACK 1
 #endif
 
 // The table's resolution. Memory is 4 x (N+1) x 8 B = 131 kB at 4096; a finer
@@ -275,10 +283,8 @@ public:
     // `n11` (the C3-R5 junction) contributes 2.0 % of the current that moves
     // the rail, and only this stage knows it.
     double n11() const { return n11_; }
-    // Probes: the three nodes the stage solves (diagnostics).
+    // The node this stage drives on stage 1's input side (stage 1 reads it).
     double probe_v5() const { return v5_; }
-    double probe_v7() const { return v7_; }
-    double probe_v2() const { return v2_; }
 
     // Input and output in ABSOLUTE VOLTAGE (volts to ground): `v5` is what
     // stage 1 puts on `n4`, and the return is `n7`.
@@ -288,10 +294,6 @@ public:
     //
     //   -DNLSC_E2_NO_RS      `RS` = 0 => the diodes' two internal nodes
     //                        vanish and the Newton goes from 3x3 to SCALAR.
-    //   -DNLSC_E2_CHARGE_TT  removes ONLY the depletion (`CJO`), where the
-    //                        single `pow` lives. Diffusion (`TT`) stays and
-    //                        costs two multiplies, reusing the exponential
-    //                        already computed.
     //   -DNLSC_E2_NO_CHARGE  removes the junction charge ENTIRELY (`CJO`
     //                        and `TT`) => one exponential per iteration
     //                        instead of two `diode()` calls, one state less.
@@ -378,8 +380,9 @@ public:
 #else
         const double v2_lin = (gm_ * (x - v5) + s2) / Y2;
 #endif
-        if (v2_lin <= kVeeSat || v2_lin >= kVccSat) {
-            const double vsat = (v2_lin <= kVeeSat) ? kVeeSat : kVccSat;
+        clip_hit_ = (v2_lin <= vlo_ || v2_lin >= vhi_);
+        if (clip_hit_) {
+            const double vsat = (v2_lin <= vlo_) ? vlo_ : vhi_;
 #if NLSC_E2_CHARGE_E3
 #if NLSC_E2_HOIST
             v5  = w + (vsat + kRO * iF + kRO * Ieq_) * invD_;
@@ -418,8 +421,8 @@ public:
                 const double t  = NLSC_TANH(gm_ * (x - u) * inv_imax_);
                 const double v2 = (imax_ * t + s2) * iY2;
                 double v3 = v2, dv3 = -gm_ * (1.0 - t * t) * iY2;
-                if (v2 <= kVeeSat)      { v3 = kVeeSat; dv3 = 0.0; }
-                else if (v2 >= kVccSat) { v3 = kVccSat; dv3 = 0.0; }
+                if (v2 <= vlo_)      { v3 = vlo_; dv3 = 0.0; }
+                else if (v2 >= vhi_) { v3 = vhi_; dv3 = 0.0; }
                 hp = 1.0 - dv3 * invDd;
                 const double du = -(u - base - v3 * invDd) / hp;
                 u += du;
@@ -454,7 +457,7 @@ public:
     bool solve_hot(double x, double c, double s2, double w_flat,
                    double& w, double& v5
 #if NLSC_E2_HOT_CACHE
-                   , mna::Engine::DOut& o1u, mna::Engine::DOut& o2u
+                   , mna::Devices::DOut& o1u, mna::Devices::DOut& o2u
 #endif
                    ) const
     {
@@ -470,11 +473,11 @@ public:
             gd = d_.IS * (e + ei) * d_.inv_nvt;
 #else
 #if NLSC_E2_PAIR_EXP
-            mna::Engine::DOut o1, o2;
-            mna::Engine::diode_par(d_, jd_, w, kCharge, o1, o2);
+            mna::Devices::DOut o1, o2;
+            mna::Devices::diode_par(d_, jd_, w, kCharge, o1, o2);
 #else
-            const mna::Engine::DOut o1 = mna::Engine::diode(d_, jd_,  w, kCharge);
-            const mna::Engine::DOut o2 = mna::Engine::diode(d_, jd_, -w, kCharge);
+            const mna::Devices::DOut o1 = mna::Devices::diode(d_, jd_,  w, kCharge);
+            const mna::Devices::DOut o2 = mna::Devices::diode(d_, jd_, -w, kCharge);
 #endif
 #if NLSC_E2_HOT_CACHE
             o1u = o1; o2u = o2;
@@ -492,8 +495,8 @@ public:
             const double dw = -cb.F / cb.dF;
             const double tol = kTolAbs + kTolRel * std::fabs(x);
             const double wn = w + dw;
-            w = (wn >= 0.0) ?  mna::Engine::pnjlim( wn,  w, nvtD_, vcritD_)
-                            : -mna::Engine::pnjlim(-wn, -w, nvtD_, vcritD_);
+            w = (wn >= 0.0) ?  mna::Devices::pnjlim( wn,  w, nvtD_, vcritD_)
+                            : -mna::Devices::pnjlim(-wn, -w, nvtD_, vcritD_);
             if (std::fabs(dw) < tol) return true;
         }
         return false;
@@ -566,7 +569,7 @@ public:
         // 1e-6 abs and 1e-5 rel, over a charge of a few pF, that is ~1e-17 C,
         // far below what the solver accepts as converged. This margin is set by
         // the tolerance: if the tolerance is relaxed, re-examine it.
-        mna::Engine::DOut o1u{}, o2u{};
+        mna::Devices::DOut o1u{}, o2u{};
 #endif
 #if NLSC_E2_TABLE
         // THE INDEX, WITHOUT A SINGLE TRANSCENDENTAL.
@@ -615,7 +618,6 @@ public:
                 // Newton, which is still compiled and is the same fallback
                 // stage 4's cache uses.
                 uses_table = false;
-                ++out_of_box_;
             }
         }
 #endif
@@ -648,11 +650,11 @@ public:
             gd = d_.IS * (e + ei) * d_.inv_nvt;
 #else
 #if NLSC_E2_PAIR_EXP
-            mna::Engine::DOut o1, o2;
-            mna::Engine::diode_par(d_, jd_, w, kCharge, o1, o2);
+            mna::Devices::DOut o1, o2;
+            mna::Devices::diode_par(d_, jd_, w, kCharge, o1, o2);
 #else
-            const mna::Engine::DOut o1 = mna::Engine::diode(d_, jd_,  w, kCharge);
-            const mna::Engine::DOut o2 = mna::Engine::diode(d_, jd_, -w, kCharge);
+            const mna::Devices::DOut o1 = mna::Devices::diode(d_, jd_,  w, kCharge);
+            const mna::Devices::DOut o2 = mna::Devices::diode(d_, jd_, -w, kCharge);
 #endif
 #if NLSC_E2_CHARGE_CACHE
             o1u = o1; o2u = o2;
@@ -678,6 +680,14 @@ public:
             // once" holds for every path. The table takes ONE pass of the body.
             if (uses_table) {
                 (void)it;
+                if (NLSC_E2_TABLE_CLIP_FALLBACK && __builtin_expect(clip_hit_, 0)) {
+                    // The table holds the UNCLIPPED branch. With the real headroom (njm4558.sub v2.1)
+                    // the output clips below the slew threshold, so a clipped sample no longer reaches the slew
+                    // re-solve: here it goes to the Newton from the table's w (unclipped samples: unchanged).
+                    uses_table = false;
+                    ++table_clip_;
+                    continue;
+                }
                 converged = true;
                 break;                                    // everything below is already set
             }
@@ -703,8 +713,8 @@ public:
             // −4.65 V, impossible across two silicon diodes, and the Newton
             // would stop converging.
             const double wn = w + dw;
-            w = (wn >= 0.0) ?  mna::Engine::pnjlim( wn,  w, nvtD_, vcritD_)
-                            : -mna::Engine::pnjlim(-wn, -w, nvtD_, vcritD_);
+            w = (wn >= 0.0) ?  mna::Devices::pnjlim( wn,  w, nvtD_, vcritD_)
+                            : -mna::Devices::pnjlim(-wn, -w, nvtD_, vcritD_);
             if (std::fabs(dw) < tol) { converged = true; break; }
         }
 #if NLSC_E2_SLEW == 2
@@ -780,7 +790,19 @@ public:
 #else
             const double v2p = (gm_ * (x - v5) + s2) / Y2;
 #endif
-            if (v2p <= kVeeSat || v2p >= kVccSat) ++sat_;
+            if (v2p <= vlo_ || v2p >= vhi_) ++sat_;
+            // the clip window for the NEXT sample, from this sample's output current (njm4558.sub v2.1). Only near a
+            // rail: the shift is under ~1.1 V at the pedal's currents (<= 10 mA), so a pole node more than kNear
+            // inside both zero-current levels cannot clip next sample whatever the shift (a log + sqrt per sample cost
+            // +5 % CPU on every row).
+            if (v2p > kVccSat - kNear || v2p < kVeeSat + kNear) {
+                const double v3c = v2p < vlo_ ? vlo_ : (v2p > vhi_ ? vhi_ : v2p);
+                const double dsh = kBH * fast_asinh((v3c - v7_) * (1.0 / kROS) * (0.5 / kIH));
+                vhi_ = kVccSat - dsh;
+                vlo_ = kVeeSat - dsh;
+            } else {
+                vhi_ = kVccSat; vlo_ = kVeeSat;
+            }
         }
 
 #if NLSC_E2_CHARGE_E3
@@ -801,24 +823,29 @@ public:
                            - Gleg_ * invG3_ * ci3_;
         cv3_ = cv3_ + invG3_ * (i_leg + ci3_);  ci3_ = i_leg;
         n11_ = v5 - cv3_;
-        icp_ = Gcp_ * (v2_ - cvcp_) - icp_;  cvcp_ = v2_;
+        // The pole node held inside the supply (njm4558.sub v2.1): on the clamp it no longer winds up
+        // to tens of volts. Pinned at a rail, the capacitor's current is zero (no trapezoidal ringing in icp_).
+        if (NLSC_E2_POLE_PIN && (v2_ > kVcc || v2_ < 0.0)) {
+            v2_ = v2_ > kVcc ? kVcc : 0.0;
+            icp_ = 0.0;  cvcp_ = v2_;
+        } else {
+            icp_ = Gcp_ * (v2_ - cvcp_) - icp_;  cvcp_ = v2_;
+        }
         if (kCharge) {
 #if NLSC_E2_CHARGE_CACHE && !defined(NLSC_E2_NO_CHARGE)
             const double q1 = o1u.q, q2 = o2u.q;   // already evaluated by the Newton
             di1_ = g2h_ * (q1 - dq1_) - di1_;  dq1_ = q1;
             di2_ = g2h_ * (q2 - dq2_) - di2_;  dq2_ = q2;
 #else
-            const double q1 = mna::Engine::diode(d_, jd_,  w, kCharge).q;
+            const double q1 = mna::Devices::diode(d_, jd_,  w, kCharge).q;
             di1_ = g2h_ * (q1 - dq1_) - di1_;  dq1_ = q1;
-            const double q2 = mna::Engine::diode(d_, jd_, -w, kCharge).q;
+            const double q2 = mna::Devices::diode(d_, jd_, -w, kCharge).q;
             di2_ = g2h_ * (q2 - dq2_) - di2_;  dq2_ = q2;
 #endif
         }
         return v7_;
     }
 
-    long slew_exercised() const { return slew_; }
-    long sat_exercised() const { return sat_; }
 #elif defined(NLSC_E2_OPAMP_REAL)
     // ---- path with the REAL OPAMP inside the loop (3x3) ----
     //
@@ -846,8 +873,8 @@ public:
             id = d_.IS * (e - ei);
             gd = d_.IS * (e + ei) * d_.inv_nvt;
 #else
-            const mna::Engine::DOut o1 = mna::Engine::diode(d_, jd_,  w, kCharge);
-            const mna::Engine::DOut o2 = mna::Engine::diode(d_, jd_, -w, kCharge);
+            const mna::Devices::DOut o1 = mna::Devices::diode(d_, jd_,  w, kCharge);
+            const mna::Devices::DOut o2 = mna::Devices::diode(d_, jd_, -w, kCharge);
             id = (o1.i + g2h_ * (o1.q - dq1_) - di1_)
                - (o2.i + g2h_ * (o2.q - dq2_) - di2_);
             gd = (o1.g + g2h_ * o1.c) + (o2.g + g2h_ * o2.c);
@@ -894,7 +921,7 @@ public:
 
             v5_ += d5; v2_ += d2;
             const double v7n = v7_ + d7;
-            v7_ = v5_ - mna::Engine::pnjlim(v5_ - v7n, w, nvtD_, vcritD_);
+            v7_ = v5_ - mna::Devices::pnjlim(v5_ - v7n, w, nvtD_, vcritD_);
 
             const double tol = kTolAbs + kTolRel * std::fabs(x);
             if (std::fabs(d5) < tol && std::fabs(d7) < tol && std::fabs(d2) < tol) break;
@@ -908,9 +935,9 @@ public:
         n11_ = v5_ - cv3_;
         icp_ = Gcp_ * (v2_ - cvcp_) - icp_;  cvcp_ = v2_;
         if (kCharge) {
-            const double q1 = mna::Engine::diode(d_, jd_,  w, kCharge).q;
+            const double q1 = mna::Devices::diode(d_, jd_,  w, kCharge).q;
             di1_ = g2h_ * (q1 - dq1_) - di1_;  dq1_ = q1;
-            const double q2 = mna::Engine::diode(d_, jd_, -w, kCharge).q;
+            const double q2 = mna::Devices::diode(d_, jd_, -w, kCharge).q;
             di2_ = g2h_ * (q2 - dq2_) - di2_;  dq2_ = q2;
         }
         return v7_;
@@ -933,8 +960,8 @@ public:
             id = d_.IS * (e - ei);
             gd = d_.IS * (e + ei) * d_.inv_nvt;
 #else
-            const mna::Engine::DOut o1 = mna::Engine::diode(d_, jd_,  w, kCharge);
-            const mna::Engine::DOut o2 = mna::Engine::diode(d_, jd_, -w, kCharge);
+            const mna::Devices::DOut o1 = mna::Devices::diode(d_, jd_,  w, kCharge);
+            const mna::Devices::DOut o2 = mna::Devices::diode(d_, jd_, -w, kCharge);
             id = (o1.i + g2h_ * (o1.q - dq1_) - di1_)
                - (o2.i + g2h_ * (o2.q - dq2_) - di2_);
             gd = (o1.g + g2h_ * o1.c) + (o2.g + g2h_ * o2.c);
@@ -946,7 +973,7 @@ public:
             const double tol = kTolAbs + kTolRel * std::fabs(v5);
             // The junction limits as in SPICE: without this a cold start
             // overflows the exponential and the Newton never comes back.
-            w = mna::Engine::pnjlim(w + dw, w, nvtD_, vcritD_);
+            w = mna::Devices::pnjlim(w + dw, w, nvtD_, vcritD_);
             if (std::fabs(dw) < tol) break;
         }
         v7_ = v5 - w;
@@ -957,9 +984,9 @@ public:
         ci3_ = i_leg;
         n11_ = v5 - cv3_;
 #if !defined(NLSC_E2_NO_CHARGE)
-        const double q1 = mna::Engine::diode(d_, jd_,  w, kCharge).q;
+        const double q1 = mna::Devices::diode(d_, jd_,  w, kCharge).q;
         di1_ = g2h_ * (q1 - dq1_) - di1_;  dq1_ = q1;
-        const double q2 = mna::Engine::diode(d_, jd_, -w, kCharge).q;
+        const double q2 = mna::Devices::diode(d_, jd_, -w, kCharge).q;
         di2_ = g2h_ * (q2 - dq2_) - di2_;  dq2_ = q2;
 #endif
         return v7_;
@@ -978,8 +1005,8 @@ public:
         for (int it = 0; it < kMaxIt; ++it) {
             const double vd1 = va1_ - v7_;     // D1's junction (anode at n5)
             const double vd2 = va2_ - v5;      // D2's junction (anode at n7)
-            const mna::Engine::DOut o1 = mna::Engine::diode(d_, jd_, vd1, kCharge);
-            const mna::Engine::DOut o2 = mna::Engine::diode(d_, jd_, vd2, kCharge);
+            const mna::Devices::DOut o1 = mna::Devices::diode(d_, jd_, vd1, kCharge);
+            const mna::Devices::DOut o2 = mna::Devices::diode(d_, jd_, vd2, kCharge);
 
             const double ij1 = o1.i + g2h_ * (o1.q - dq1_) - di1_;
             const double ij2 = o2.i + g2h_ * (o2.q - dq2_) - di2_;
@@ -1010,8 +1037,8 @@ public:
             const double v7n = v7_ + d7;
             // Junctions limit as in SPICE: without this, a cold start
             // overflows the exponential and the Newton never comes back.
-            const double vd1n = mna::Engine::pnjlim((va1_ + d1) - v7n, vd1, nvtD_, vcritD_);
-            const double vd2n = mna::Engine::pnjlim((va2_ + d2) - v5,  vd2, nvtD_, vcritD_);
+            const double vd1n = mna::Devices::pnjlim((va1_ + d1) - v7n, vd1, nvtD_, vcritD_);
+            const double vd2n = mna::Devices::pnjlim((va2_ + d2) - v5,  vd2, nvtD_, vcritD_);
             v7_  = v7n;
             va1_ = vd1n + v7n;
             va2_ = vd2n + v5;
@@ -1036,9 +1063,9 @@ public:
         ci3_ = i_leg;
 
         if (kCharge) {
-            const double q1 = mna::Engine::diode(d_, jd_, va1_ - v7_, kCharge).q;
+            const double q1 = mna::Devices::diode(d_, jd_, va1_ - v7_, kCharge).q;
             di1_ = g2h_ * (q1 - dq1_) - di1_;  dq1_ = q1;
-            const double q2 = mna::Engine::diode(d_, jd_, va2_ - v5, kCharge).q;
+            const double q2 = mna::Devices::diode(d_, jd_, va2_ - v5, kCharge).q;
             di2_ = g2h_ * (q2 - dq2_) - di2_;  dq2_ = q2;
         }
 
@@ -1089,24 +1116,33 @@ private:
     static constexpr double kInvRS  = 1.0 / kRS;
     static constexpr double kInvRCM = 1.0 / 500e6; // macromodel Rcm2
     static constexpr double kInvRIN = 1.0 / 5e6;   // Rin between the inputs
-    // `NLSC_E2_RO0` makes `Ro` ≈ 0: a DISCRIMINATOR, not a model. With a rigid
-    // output the load stage 3 hangs off `n7` cannot matter, which isolates
-    // that load's contribution. (The loop gain is 2140 at 1 kHz but 8.2 at
-    // 5 kHz, where the drop across `Ro` is about −42 dB.)
-#if defined(NLSC_E2_RO0)
-    static constexpr double kInvRO  = 1.0 / 1e-3;
-#else
+    // The loop gain through `Ro` is 2140 at 1 kHz but 8.2 at 5 kHz, where the
+    // drop across it is about −42 dB: stage 3's load on `n7` matters there.
     static constexpr double kInvRO  = 1.0 / 75.0;  // macromodel Ro
-#endif
-    static constexpr double kVccSat = 9.0 - 1.5;   // clipping against the rails
-    static constexpr double kVeeSat = 0.0 + 1.5;
+    // THE OUTPUT STAGE'S HEADROOM, from docs/handoff/njm4558.sub v2.1 (fitted to the NJM4558 sheet's
+    // curves, checked by `make opamp-sheet`; tools/check_opamp_consts.py holds these to the sub's .params). The clip
+    // window, kHeadroom = kH0 + kCS*(15 - 4.5) inside each 9 V rail at zero current, SHIFTS by -d(I),
+    // d(I) = kBH*asinh(I/(2*kIH)), I the current the output sources; then the 75 ohm. Here the shift is taken from
+    // the LAST sample's current (vhi_/vlo_, set after each solve): inside a sample the clip is a fixed level as it
+    // always was, so the scalar Newton and the table keep their structure (a shift solved inside the sample made
+    // the branch switch inside the Newton and the limit row cost 3-8x).
+    static constexpr double kH0 = 0.7, kCS = 0.0805, kBH = 0.461, kIH = 1.08e-3, kROS = 75.0;
+    static constexpr double kHeadroom = kH0 + kCS * (15.0 - 4.5);
+    static constexpr double kVccSat = 9.0 - kHeadroom;   // the window at zero current
+    static constexpr double kVeeSat = 0.0 + kHeadroom;
+    static constexpr double kVcc = 9.0;                 // the supply the pole node cannot leave (njm4558.sub v2.1 Blim)
+    static constexpr double kNear = 1.5;                // volts: past the largest shift at the pedal's currents
+    static inline double fast_asinh(double x)
+    {
+        const double ax = std::fabs(x);
+        return std::copysign(std::log(ax + std::sqrt(ax * ax + 1.0)), x);
+    }
     // THREE JUNCTION-CHARGE MODES, plus none. The charge's two terms do NOT
     // cost the same: DEPLETION carries a `pow` (the most expensive
     // transcendental here) and DIFFUSION is two multiplies reusing the
     // exponential already computed. They are separate switches because one is
     // mainly a COST lever and the other a FIDELITY lever.
     //   (nothing)               -> 1, depletion + diffusion (default)
-    //   -DNLSC_E2_CHARGE_TT     -> 2, diffusion ONLY: saves the `pow`
     //   -DNLSC_E2_NO_DIFFUSION  -> 3, depletion only
     //   -DNLSC_E2_NO_CHARGE     -> 0, none
     //
@@ -1118,8 +1154,6 @@ private:
     // 15.2 dB.
 #if defined(NLSC_E2_NO_CHARGE)
     static constexpr int    kCharge = 0;   // none — costs 15.2 dB
-#elif defined(NLSC_E2_CHARGE_TT)
-    static constexpr int    kCharge = 2;   // diffusion only — costs 15.2 dB
 #elif defined(NLSC_E2_NO_DIFFUSION)
     static constexpr int    kCharge = 3;   // depletion only
 #else
@@ -1134,15 +1168,6 @@ private:
     // Convergence-probe counters (diagnostics).
     long   unconverged_count_ = 0, samples_ = 0;
     double w_ext_ = 0.0;
-public:
-    long   unconverged() const   { return unconverged_count_; }
-    long   samples() const  { return samples_; }
-    double w_extreme() const { return w_ext_; }
-    void   reset_probe()
-    {
-        unconverged_count_ = samples_ = 0; w_ext_ = 0.0;
-    }
-private:
 // THE ITERATION CAP. The Newton must converge: a cap too low to converge
 // (e.g. 1) leaves the stage silent, and silence is finite, so a NaN check
 // does not catch it.
@@ -1194,8 +1219,8 @@ public:
     // see the same thing.
     double ID(double w) const
     {
-        const mna::Engine::DOut a1 = mna::Engine::diode(d_, jd_,  w, kCharge);
-        const mna::Engine::DOut a2 = mna::Engine::diode(d_, jd_, -w, kCharge);
+        const mna::Devices::DOut a1 = mna::Devices::diode(d_, jd_,  w, kCharge);
+        const mna::Devices::DOut a2 = mna::Devices::diode(d_, jd_, -w, kCharge);
         return (a1.i + g2h_ * a1.q) - (a2.i + g2h_ * a2.q);
     }
 
@@ -1208,8 +1233,8 @@ public:
     // loop.
     void ID_d(double w, double& valor, double& deriv) const
     {
-        const mna::Engine::DOut a1 = mna::Engine::diode(d_, jd_,  w, kCharge);
-        const mna::Engine::DOut a2 = mna::Engine::diode(d_, jd_, -w, kCharge);
+        const mna::Devices::DOut a1 = mna::Devices::diode(d_, jd_,  w, kCharge);
+        const mna::Devices::DOut a2 = mna::Devices::diode(d_, jd_, -w, kCharge);
         valor = (a1.i + g2h_ * a1.q) - (a2.i + g2h_ * a2.q);
         deriv = (a1.g + g2h_ * a1.c) + (a2.g + g2h_ * a2.c);
     }
@@ -1257,8 +1282,6 @@ private:
     double tq1_[kTableN + 1] = {0.0};   // q(+w)
     double tq2_[kTableN + 1] = {0.0};   // q(-w)
     double tP_ = 0.0, tQ_ = 0.0, tS_ = 1.0;
-    long out_of_box_ = 0;      // samples the table REFUSED to answer
-    long fill_unconverged_ = 0; // bins that hit the cap without converging
 #if NLSC_E2_TABLE
     // What the table hands a sample's loop. Members rather than locals because
     // the loop that consumes them sits behind several `#if`s, and a local
@@ -1295,10 +1318,6 @@ private:
     bool   tb_gesture_ = false;
 #endif
 
-public:
-    double table_P() const { return tP_; }
-    double table_Q() const { return tQ_; }
-private:
 
     // ARMS the cursor: computes the coefficients and leaves the table UNBUILT.
     // It fills nothing if the fill is deferred. If it is not — callers that
@@ -1361,11 +1380,7 @@ private:
                 // `w(R')` is monotone, so the previous bin's solution is one
                 // step from this one.
                 w = tb_wprev_;
-                // Non-convergences are COUNTED: an unconverged bin would store
-                // a bad `w` that is then read for the whole gesture with no
-                // signal at all.
-                int it = 0;
-                for (; it < kMaxItFill; ++it) {
+                for (int it = 0; it < kMaxItFill; ++it) {
                     // ANALYTIC derivative, not numerical. `diode` already
                     // returns `g` (di/dv) and `c` (dq/dv), and it is the SAME
                     // expression the audio loop calls `gd`: one evaluation of
@@ -1381,7 +1396,6 @@ private:
                     w += step;
                     if (std::fabs(step) < NLSC_E2_TABLE_FILL_TOL) break;
                 }
-                if (it >= kMaxItFill) ++fill_unconverged_;
                 tb_wprev_ = w;
             }
             table_[b] = w;
@@ -1390,8 +1404,8 @@ private:
             // with `w` set and `ID`/`q` at zero is exactly a table that does not
             // fail and answers wrongly.
             tID_[b] = ID(w);
-            tq1_[b] = mna::Engine::diode(d_, jd_,  w, kCharge).q;
-            tq2_[b] = mna::Engine::diode(d_, jd_, -w, kCharge).q;
+            tq1_[b] = mna::Devices::diode(d_, jd_,  w, kCharge).q;
+            tq2_[b] = mna::Devices::diode(d_, jd_, -w, kCharge).q;
             if (++tb_b_ > kTableN) {
                 tb_pending_  = false;
                 tb_ready_ = true;
@@ -1419,17 +1433,6 @@ public:
     void table_deferred(bool v) { tb_deferred_ = v; }
     // Armed by whoever KNOWS why the re-tune happened, not by this stage.
     void table_gesture(bool v) { tb_gesture_ = v; }
-    // During the WAIT there is nothing "pending" in the cursor and the table
-    // does not exist either: returning false there would read as "already
-    // ready".
-    bool table_pending() const { return tb_pending_ || tb_wait_ > 0; }
-    // Observability: "the box never fires in normal use" is CHECKABLE.
-    long table_out_of_box() const { return out_of_box_; }
-    long table_fill_unconverged() const { return fill_unconverged_; }
-    void table_out_of_box_reset() { out_of_box_ = 0; fill_unconverged_ = 0; }
-    // Observability: how many bins are left, so that "the table comes back" is
-    // CHECKABLE and not an assumption.
-    long table_bins_left() const { return tb_pending_ ? long(kTableN + 1 - tb_b_) : 0; }
 private:
 
     // The four quantities that depend on `w`, with ONE warp, ONE division and
@@ -1500,6 +1503,7 @@ public:
         dq1_ = dq2_ = di1_ = di2_ = 0.0;
         v7_ = v5; va1_ = v5; va2_ = v5;
         v5_ = v5; v2_ = v5; cvcp_ = v5; icp_ = 0.0;
+        vhi_ = kVccSat; vlo_ = kVeeSat;
 
         const double G4_saved = G4_, Gleg_saved = Gleg_, g2h_saved = g2h_;
         const double Gcp_saved = Gcp_;
@@ -1527,8 +1531,8 @@ public:
         cvcp_ = v2_;           icp_ = 0.0;
         // The charge history is seeded only when the charge is on: otherwise
         // the next step would subtract a charge that is no longer computed.
-        dq1_ = kCharge ? mna::Engine::diode(d_, jd_, va1_ - v7_, kCharge).q : 0.0;  di1_ = 0.0;
-        dq2_ = kCharge ? mna::Engine::diode(d_, jd_, va2_ - v5_dc(), kCharge).q : 0.0;  di2_ = 0.0;
+        dq1_ = kCharge ? mna::Devices::diode(d_, jd_, va1_ - v7_, kCharge).q : 0.0;  di1_ = 0.0;
+        dq2_ = kCharge ? mna::Devices::diode(d_, jd_, va2_ - v5_dc(), kCharge).q : 0.0;  di2_ = 0.0;
 #if NLSC_E2_PREDICTOR >= 1
         // The DC loop above has called `process()` 240 times: without
         // this, the first REAL sample extrapolates from the settling.
@@ -1537,8 +1541,6 @@ public:
     }
 
 #if NLSC_E2_SLEW
-    long slew_hot() const { return slew_hot_; }   // samples solved again with the limit
-    long slew_first() const { return slew_first_; }  // index of the first one, -1 if none
 #endif
 
     // DC `n5`: with the REAL opamp a solved unknown; with the ideal one
@@ -1553,7 +1555,7 @@ public:
     }
 
     mna::DModel d_{};
-    mna::Engine::Junc jd_{};
+    mna::Devices::Junc jd_{};
     double h_ = 0, g2h_ = 0, vr_ = 0, Rf_ = 0, G4_ = 0, Gleg_ = 0;
     double nvtD_ = 0, vcritD_ = 0, v5_0_ = 0;
     double v7_ = 0, va1_ = 0, va2_ = 0;
@@ -1561,6 +1563,9 @@ public:
     double dq1_ = 0, dq2_ = 0, di1_ = 0, di2_ = 0;
     // real-opamp path only
     double v5_ = 0, v2_ = 0, cvcp_ = 0, icp_ = 0;
+    double vhi_ = kVccSat, vlo_ = kVeeSat;   // the clip window this sample (shifted by the last sample's current)
+    mutable bool clip_hit_ = false;          // the last residual() took the clipped branch
+    long table_clip_ = 0;                    // table samples sent to the Newton because they clip
 #if NLSC_E2_SLEW
     bool slew_on_ = (NLSC_E2_SLEW == 1);
     long slew_hot_ = 0;

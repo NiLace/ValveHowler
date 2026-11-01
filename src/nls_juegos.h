@@ -28,7 +28,7 @@ namespace nlsc {
 // ─────────────────────────────────────────────────────────────────────────────
 //  The OD-8 bank (index 0), whose namespaces carry no suffix.
 // ─────────────────────────────────────────────────────────────────────────────
-struct Bank808 {
+struct BankOd8 {
     // stage 1 — fixed filters and its waveshaper (Q1)
     static constexpr auto& H1_B = fixed::kH1_B;   static constexpr auto& H1_A = fixed::kH1_A;
     static constexpr auto& HS_B = fixed::kHS_B;   static constexpr auto& HS_A = fixed::kHS_A;
@@ -89,60 +89,60 @@ struct Bank808 {
     // How Q2 is solved in stage 4: `false` = the tabulated polynomial,
     // `true` = the scalar-Newton subsystem. It lives in the bank, not in an
     // index comparison in the engine, so each circuit states its own choice.
-    static constexpr bool   use_sub = kSubIn808;
+    static constexpr bool   use_sub = kSubInOd8;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  The **OD-9** bank (index 1)
 // ─────────────────────────────────────────────────────────────────────────────
-struct Bank9ri {
-    static constexpr auto& H1_B = fixed_v9ri::kH1_B;   static constexpr auto& H1_A = fixed_v9ri::kH1_A;
-    static constexpr auto& HS_B = fixed_v9ri::kHS_B;   static constexpr auto& HS_A = fixed_v9ri::kHS_A;
-    static constexpr auto& H2_B = fixed_v9ri::kH2_B;   static constexpr auto& H2_A = fixed_v9ri::kH2_A;
-    static constexpr const double* WS = stage1_v9ri::kWS;
-    static constexpr int    WS_N = stage1_v9ri::kWS_N;
-    static constexpr double Qn3 = stage1_v9ri::kQn3, Qn6 = stage1_v9ri::kQn6;
+struct BankOd9 {
+    static constexpr auto& H1_B = fixed_od9::kH1_B;   static constexpr auto& H1_A = fixed_od9::kH1_A;
+    static constexpr auto& HS_B = fixed_od9::kHS_B;   static constexpr auto& HS_A = fixed_od9::kHS_A;
+    static constexpr auto& H2_B = fixed_od9::kH2_B;   static constexpr auto& H2_A = fixed_od9::kH2_A;
+    static constexpr const double* WS = stage1_od9::kWS;
+    static constexpr int    WS_N = stage1_od9::kWS_N;
+    static constexpr double Qn3 = stage1_od9::kQn3, Qn6 = stage1_od9::kQn6;
     // The travel of Q1's waveshaper fit, for its tangent guard. Each
     // variant fits its own curve, so each brings its own range.
-    static constexpr double WS_UMIN = stage1_v9ri::kWS_UMIN, WS_UMAX = stage1_v9ri::kWS_UMAX;
+    static constexpr double WS_UMIN = stage1_od9::kWS_UMIN, WS_UMAX = stage1_od9::kWS_UMAX;
 
-    static constexpr auto& E4GS_B = fixed_v9ri::kE4GS_B; static constexpr auto& E4GS_A = fixed_v9ri::kE4GS_A;
-    static constexpr auto& E4G2_B = fixed_v9ri::kE4G2_B; static constexpr auto& E4G2_A = fixed_v9ri::kE4G2_A;
-    static constexpr const double* WS2 = e234_v9ri::kWS2;
-    static constexpr int    WS2_N = e234_v9ri::kWS2_N;
-    static constexpr double WS2_UMIN = e234_v9ri::kWS2_UMIN, WS2_UMAX = e234_v9ri::kWS2_UMAX;
+    static constexpr auto& E4GS_B = fixed_od9::kE4GS_B; static constexpr auto& E4GS_A = fixed_od9::kE4GS_A;
+    static constexpr auto& E4G2_B = fixed_od9::kE4G2_B; static constexpr auto& E4G2_A = fixed_od9::kE4G2_A;
+    static constexpr const double* WS2 = e234_od9::kWS2;
+    static constexpr int    WS2_N = e234_od9::kWS2_N;
+    static constexpr double WS2_UMIN = e234_od9::kWS2_UMIN, WS2_UMAX = e234_od9::kWS2_UMAX;
 
-    static constexpr auto& N3_B  = fixed_v9ri::kN3_B;  static constexpr auto& N3_A  = fixed_v9ri::kN3_A;
-    static constexpr auto& VRA_B = fixed_v9ri::kVRA_B; static constexpr auto& VRA_A = fixed_v9ri::kVRA_A;
-    static constexpr auto& VRB_B = fixed_v9ri::kVRB_B; static constexpr auto& VRB_A = fixed_v9ri::kVRB_A;
-    static constexpr auto& VRP_B = fixed_v9ri::kVRP_B; static constexpr auto& VRP_A = fixed_v9ri::kVRP_A;
-    // `VRC` is the `n19` branch — see the 808 bank's note; same mechanism,
+    static constexpr auto& N3_B  = fixed_od9::kN3_B;  static constexpr auto& N3_A  = fixed_od9::kN3_A;
+    static constexpr auto& VRA_B = fixed_od9::kVRA_B; static constexpr auto& VRA_A = fixed_od9::kVRA_A;
+    static constexpr auto& VRB_B = fixed_od9::kVRB_B; static constexpr auto& VRB_A = fixed_od9::kVRB_A;
+    static constexpr auto& VRP_B = fixed_od9::kVRP_B; static constexpr auto& VRP_A = fixed_od9::kVRP_A;
+    // `VRC` is the `n19` branch — see the OD-8 bank's note; same mechanism,
     // this variant's own numbers.
-    static constexpr auto& VRC_B = fixed_v9ri::kVRC_B; static constexpr auto& VRC_A = fixed_v9ri::kVRC_A;
-    static constexpr auto& E2C_B = fixed_v9ri::kE2C_B; static constexpr auto& E2C_A = fixed_v9ri::kE2C_A;
-    static constexpr double ScaleF = fixed_v9ri::kScale;
+    static constexpr auto& VRC_B = fixed_od9::kVRC_B; static constexpr auto& VRC_A = fixed_od9::kVRC_A;
+    static constexpr auto& E2C_B = fixed_od9::kE2C_B; static constexpr auto& E2C_A = fixed_od9::kE2C_A;
+    static constexpr double ScaleF = fixed_od9::kScale;
 
-    static constexpr auto& nB  = level_v9ri::kB;   static constexpr auto& nA  = level_v9ri::kA;
-    static constexpr auto& nBr = level_v9ri::kBr;  static constexpr auto& nAr = level_v9ri::kAr;
-    static constexpr auto& nBo = level_v9ri::kBo;  static constexpr auto& nAo = level_v9ri::kAo;
-    static constexpr auto& nBz = level_v9ri::kBz;  static constexpr auto& nBro = level_v9ri::kBro;
-    static constexpr double ScaleN = level_v9ri::kScale;
+    static constexpr auto& nB  = level_od9::kB;   static constexpr auto& nA  = level_od9::kA;
+    static constexpr auto& nBr = level_od9::kBr;  static constexpr auto& nAr = level_od9::kAr;
+    static constexpr auto& nBo = level_od9::kBo;  static constexpr auto& nAo = level_od9::kAo;
+    static constexpr auto& nBz = level_od9::kBz;  static constexpr auto& nBro = level_od9::kBro;
+    static constexpr double ScaleN = level_od9::kScale;
 
-    static constexpr auto& Rvr  = rest_v9ri::kvr;   static constexpr auto& Rn3  = rest_v9ri::kn3;
-    static constexpr auto& Rn4  = rest_v9ri::kn4;   static constexpr auto& Rn6  = rest_v9ri::kn6;
-    static constexpr auto& Rn7  = rest_v9ri::kn7;   static constexpr auto& Rn14 = rest_v9ri::kn14;
-    static constexpr auto& Rn17 = rest_v9ri::kn17;  static constexpr auto& Rn19 = rest_v9ri::kn19;
-    static constexpr double Fit_n19 = rest_v9ri::kFit_n19, Fit_n17 = rest_v9ri::kFit_n17;
+    static constexpr auto& Rvr  = rest_od9::kvr;   static constexpr auto& Rn3  = rest_od9::kn3;
+    static constexpr auto& Rn4  = rest_od9::kn4;   static constexpr auto& Rn6  = rest_od9::kn6;
+    static constexpr auto& Rn7  = rest_od9::kn7;   static constexpr auto& Rn14 = rest_od9::kn14;
+    static constexpr auto& Rn17 = rest_od9::kn17;  static constexpr auto& Rn19 = rest_od9::kn19;
+    static constexpr double Fit_n19 = rest_od9::kFit_n19, Fit_n17 = rest_od9::kFit_n17;
 
-    static constexpr double Q_vr = e234_v9ri::kQ_vr,  Q_n3  = e234_v9ri::kQ_n3;
-    static constexpr double Q_n4 = e234_v9ri::kQ_n4,  Q_n7  = e234_v9ri::kQ_n7;
-    static constexpr double Q_n11 = e234_v9ri::kQ_n11, Q_n14 = e234_v9ri::kQ_n14;
-    static constexpr double Q_n19 = e234_v9ri::kQ_n19, Q_out = e234_v9ri::kQ_out;
-    static constexpr double G_n3 = e234_v9ri::kG_n3,  G_n4  = e234_v9ri::kG_n4;
-    static constexpr double G_n11 = e234_v9ri::kG_n11, G_n19 = e234_v9ri::kG_n19;
+    static constexpr double Q_vr = e234_od9::kQ_vr,  Q_n3  = e234_od9::kQ_n3;
+    static constexpr double Q_n4 = e234_od9::kQ_n4,  Q_n7  = e234_od9::kQ_n7;
+    static constexpr double Q_n11 = e234_od9::kQ_n11, Q_n14 = e234_od9::kQ_n14;
+    static constexpr double Q_n19 = e234_od9::kQ_n19, Q_out = e234_od9::kQ_out;
+    static constexpr double G_n3 = e234_od9::kG_n3,  G_n4  = e234_od9::kG_n4;
+    static constexpr double G_n11 = e234_od9::kG_n11, G_n19 = e234_od9::kG_n19;
 
     static constexpr int    idx = 1;
-    static constexpr bool   use_sub = kSubInV9ri;
+    static constexpr bool   use_sub = kSubInOd9;
 };
 
 // The banks, in circuit order. This list is the dispatch: `Cascade4::prepare`
@@ -151,7 +151,7 @@ template <class... B>
 struct BankList {
     static constexpr int size = int(sizeof...(B));
 };
-using Banks = BankList<Bank808, Bank9ri>;
+using Banks = BankList<BankOd8, BankOd9>;
 
 // A list covers the circuit table when it has one bank per circuit and each
 // bank's `idx` is its position. It counts circuits, not selector rows: a row

@@ -34,7 +34,8 @@ enum PortIndex : uint32_t {
     // Both of the following act on the output.
     PORT_ENABLED      = 6,   // lv2:enabled — the footswitch
     PORT_VARIANT      = 7,   // which circuit and tone law: see `nls_variantes.h`
-    PORT_COUNT        = 8
+    PORT_HQ           = 8,   // the oversampling factor: 0 = 2x (default), 1 = 4x
+    PORT_COUNT        = 9
 };
 
 // The core, seen from outside. One entry point per thing the LV2 life cycle

@@ -31,7 +31,10 @@ struct Box { double x0, y0, x1, y1; };
 
 inline constexpr int TREADLE_X0 = 226, TREADLE_Y0 = 942, TREADLE_X1 = 674, TREADLE_Y1 = 1237;
 inline constexpr int TREADLE_FRAMES = 5;
+inline constexpr int HQ_X0 = 410, HQ_Y0 = 260, HQ_X1 = 490, HQ_Y1 = 340;
+inline constexpr int HQ_FRAMES = 3;
 inline constexpr Box TREADLE_HIT = { 230.19, 946.71, 669.81, 1231.21 };
+inline constexpr Box HQ_HIT = { 418.50, 268.60, 481.50, 332.06 };
 inline constexpr Box DISPLAY = { 204.11, 588.68, 695.89, 665.25 };
 inline constexpr Box DISPLAY_BEZEL = { 193.33, 577.88, 706.67, 676.05 };
 inline constexpr Box LABEL_PLATE = { 232.40, 712.09, 667.60, 920.70 };
