@@ -74,9 +74,9 @@ GUI_LIBS := $(shell pkg-config --libs $(GUI_PKGS))
 # It is OFL and stays OFL; its licence travels with it.
 FONTS := Doto-Round-Bold.ttf OFL-Doto.txt
 
-# The panel's images, rendered from a 3D scene: one set per box colour.
-PHOTO := $(foreach g,od9 od8,plate_$(g)_active.png plate_$(g)_bypass.png \
-           knob_$(g)_drive.png knob_$(g)_level.png knob_$(g)_tone.png) treadle.png
+# The panel's images, rendered from a 3D scene: every PNG in gui/photo/ ships. A hand list here
+# once missed the HQ button's four images and the released panel fell back to its placeholder.
+PHOTO := $(sort $(notdir $(wildcard gui/photo/*.png)))
 
 # Rebuild when the flags change, not only when a source does.
 FLAGSTAMP := $(BUILD)/.flags

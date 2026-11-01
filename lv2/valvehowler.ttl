@@ -41,12 +41,12 @@
     # latency · enabled · variant · hq (`PORT_COUNT` in `src/nls_iface.h`);
     # `hq` was appended after 1.4.2, so no index moved.
     #
-    # The public version is 1.2.0: the leading 1 is carried by the URI, and
-    # the 2.0 is what these two lines say. Both must be even: "an odd minor or
+    # The leading 1 of the public version is carried by the URI; these two
+    # lines are the rest of it (1.<minor>.<micro>). Both must be even: "an odd minor or
     # micro version, or minor version zero, indicates that the resource is a
     # development version".
     lv2:minorVersion 6 ;
-    lv2:microVersion 0 ;
+    lv2:microVersion 2 ;
 
     lv2:optionalFeature lv2:hardRTCapable ;
 

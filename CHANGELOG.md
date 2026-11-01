@@ -8,6 +8,15 @@ numbers.
 
 ---
 
+## 1.6.2 — 2026-11-01
+
+- **The editor shows the pedal again.** The 1.6.0 download was missing the four images of
+  the HQ button, so the editor drew a plain placeholder instead of the pedal. The bundle
+  now carries every image. The sound is unchanged: the plugin binary is the same as
+  1.6.0's.
+
+---
+
 ## 1.6.0 — 2026-11-01
 
 Sessions saved with 1.4.4 load with HQ off, the new default; switch HQ on for the
