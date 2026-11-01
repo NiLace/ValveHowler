@@ -19,11 +19,11 @@
 //
 // This table covers axis 1 only, and has one circuit per distinct resistor
 // pair. The axis-1 sources: Keen's table, Wampler's book (which marks them on
-// a photo of the board, `OD-8-1` = 100 Ω and `OD-8-2` = 10 kΩ, p. 255) and the
+// a photo of the board, `VH-8-1` = 100 Ω and `VH-8-2` = 10 kΩ, p. 255) and the
 // netlist transcribed from the original Eagle files, which carries the
-// factory OD-8.
+// factory VH-8.
 //
-// The OD-9 row stands for three boxes because in this model they are
+// The VH-9 row stands for three boxes because in this model they are
 // electrically identical: they share the 470/100k pair, and only the opamp
 // (axis 2) would separate them.
 //
@@ -64,7 +64,7 @@ struct Circuit {
 // out along the knob.
 //
 //   Pot   the real pot's G taper, faithful to the hardware, and the
-//         default. Agrees with a capture of the OD-9's original within 0,7 dB.
+//         default. Agrees with a capture of the VH-9's original within 0,7 dB.
 //   Even  derived by inverting the measured brightness so that dB come out
 //         even across the knob: the worst 0,1 step is 2,79 dB instead of
 //         11,03 dB, and the last tenth of travel no longer carries 67,2 % of
@@ -88,37 +88,37 @@ struct Variant {
 // model incoherent with no error raised. To try a different resistor,
 // regenerate the whole variant's bank. Without a -D on the command line these
 // macros evaluate to the values below.
-#ifndef NLSC_OD8_RSER
-#  define NLSC_OD8_RSER 100.0
+#ifndef NLSC_VH8_RSER
+#  define NLSC_VH8_RSER 100.0
 #endif
-#ifndef NLSC_OD8_RSHUNT
-#  define NLSC_OD8_RSHUNT 10e3
+#ifndef NLSC_VH8_RSHUNT
+#  define NLSC_VH8_RSHUNT 10e3
 #endif
-#ifndef NLSC_OD9_RSER
-#  define NLSC_OD9_RSER 470.0
+#ifndef NLSC_VH9_RSER
+#  define NLSC_VH9_RSER 470.0
 #endif
-#ifndef NLSC_OD9_RSHUNT
-#  define NLSC_OD9_RSHUNT 100e3
+#ifndef NLSC_VH9_RSHUNT
+#  define NLSC_VH9_RSHUNT 100e3
 #endif
 
 inline constexpr Circuit kCircuits[] = {
-    { NLSC_OD8_RSER, NLSC_OD8_RSHUNT },   // 0 — the factory OD-8
-    { NLSC_OD9_RSER, NLSC_OD9_RSHUNT },   // 1 — the OD-9
+    { NLSC_VH8_RSER, NLSC_VH8_RSHUNT },   // 0 — the factory VH-8
+    { NLSC_VH9_RSER, NLSC_VH9_RSHUNT },   // 1 — the VH-9
 };
 inline constexpr int kNumCircuits = int(sizeof(kCircuits) / sizeof(kCircuits[0]));
 
 inline constexpr Variant kVariants[] = {
-    { "OD-8 W Tone",           0, ToneLaw::Pot  },
-    { "OD-9 W Tone",           1, ToneLaw::Pot  },
-    // The same OD-8, with the tone knob's travel redistributed. Re-voicing,
-    // not fidelity: the circuit and the bank are the OD-8's; only the
+    { "VH-8 W Tone",           0, ToneLaw::Pot  },
+    { "VH-9 W Tone",           1, ToneLaw::Pot  },
+    // The same VH-8, with the tone knob's travel redistributed. Re-voicing,
+    // not fidelity: the circuit and the bank are the VH-8's; only the
     // position -> parameter law changes. It is its own row because the
     // faithful rows keep the hardware's taper.
-    { "OD-8 L Tone",      0, ToneLaw::Even },
+    { "VH-8 L Tone",      0, ToneLaw::Even },
     // The same law on the other circuit. One table serves both: stage 3
     // does not depend on the variant (under 0,0004 dB when `R14`/`R15`
-    // change), so there is no `_od9` law.
-    { "OD-9 L Tone",          1, ToneLaw::Even },
+    // change), so there is no `_vh9` law.
+    { "VH-9 L Tone",          1, ToneLaw::Even },
 };
 inline constexpr int kNumVariants = int(sizeof(kVariants) / sizeof(kVariants[0]));
 

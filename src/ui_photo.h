@@ -39,8 +39,8 @@ namespace photo {
 
 inline constexpr double LOGICAL_W = ASSET_W / 2.0;   // the window at scale 1
 inline constexpr double LOGICAL_H = ASSET_H / 2.0;
-inline constexpr int GREEN_OD9 = 0, GREEN_OD8 = 1;
-inline constexpr const char* GREEN_NAME[2] = { "od9", "od8" };
+inline constexpr int GREEN_VH9 = 0, GREEN_VH8 = 1;
+inline constexpr const char* GREEN_NAME[2] = { "vh9", "vh8" };
 inline constexpr unsigned GREEN_HEX[2] = { 0x6BC75C, 0x48B180 };   // the box paints
 inline constexpr unsigned BACKDROP_HEX = 0x161618;   // around the pedal: the colour its renders fade to
 // The lit readout's dots as the scene renders them (median of the lit pixels).
@@ -51,8 +51,8 @@ inline constexpr double TREADLE_S = 0.080;           // treadle travel, down or 
 inline constexpr double HQ_PRESS_S = 0.050;          // the HQ button's travel, down or up
 inline constexpr double HQ_GLOW_S = 0.100;           // the HQ light's fade, on or off
 
-// The circuit decides the paint: the OD-8 rows are OD-8 green, the OD-9 rows OD-9 green.
-inline int green_of_circuit(int circuit) { return circuit == 0 ? GREEN_OD8 : GREEN_OD9; }
+// The circuit decides the paint: the VH-8 rows are VH-8 green, the VH-9 rows VH-9 green.
+inline int green_of_circuit(int circuit) { return circuit == 0 ? GREEN_VH8 : GREEN_VH9; }
 
 // --- a few threads over a list of independent jobs -------------------------------
 
@@ -117,23 +117,24 @@ struct LoadJob {
 };
 
 // Every image of green `g`, into `a`'s slots. The knob strips are most of the pixels, so they
-// come first, then the plates; the treadle is the same in both greens and is left out when
-// `share_treadle` (the caller takes it from the other green's set).
-inline std::vector<LoadJob> load_list(Assets& a, int g, bool share_treadle = false)
+// come first, then the plates. The knobs and the treadle are the same in both greens (one set of
+// files) and are left out when `share` (the caller takes them from the other green's set).
+inline std::vector<LoadJob> load_list(Assets& a, int g, bool share = false)
 {
     std::vector<LoadJob> l;
-    for (int k = 0; k < 3; ++k) {
-        const KnobGeo& kg = KNOBS[k];
-        l.push_back({ std::string("knob_") + GREEN_NAME[g] + "_" + kg.name + ".png", &a.knob[k],
-                      kg.x1 - kg.x0, (kg.y1 - kg.y0) * kg.frames });
-    }
+    if (!share)
+        for (int k = 0; k < 3; ++k) {
+            const KnobGeo& kg = KNOBS[k];
+            l.push_back({ std::string("knob_") + kg.name + ".png", &a.knob[k],
+                          kg.x1 - kg.x0, (kg.y1 - kg.y0) * kg.frames });
+        }
     for (int s = 0; s < 2; ++s)
         l.push_back({ std::string("plate_") + GREEN_NAME[g] + (s ? "_bypass" : "_active") + ".png", &a.plate[s],
                       int(ASSET_W), int(ASSET_H) });
     for (int h = 0; h < 2; ++h)
         l.push_back({ std::string("hq_") + GREEN_NAME[g] + (h ? "_lit" : "_active") + ".png", &a.hq[h],
                       HQ_X1 - HQ_X0, (HQ_Y1 - HQ_Y0) * HQ_FRAMES });
-    if (!share_treadle)
+    if (!share)
         l.push_back({ "treadle.png", &a.treadle, TREADLE_X1 - TREADLE_X0, (TREADLE_Y1 - TREADLE_Y0) * TREADLE_FRAMES });
     return l;
 }
@@ -145,8 +146,8 @@ inline bool sized(cairo_surface_t* s, int w, int h)
 
 // `dir` is the bundle's `photo/` directory. A missing or unreadable image leaves `ok` false and
 // the UI draws a plain placeholder: a panel with a hole in it would look like the plugin.
-// `other`, when it holds the other green's images, lends its treadle (a second reference to
-// the same surface) instead of decoding it again.
+// `other`, when it holds the other green's images, lends its knobs and treadle (a second
+// reference to the same surfaces) instead of decoding them again.
 inline Assets load_assets(const std::string& dir, int g, const Assets* other = nullptr, bool threaded = true)
 {
     Assets a;
@@ -154,8 +155,13 @@ inline Assets load_assets(const std::string& dir, int g, const Assets* other = n
     const bool share = other && other->ok && other->treadle;
     const std::vector<LoadJob> l = load_list(a, g, share);
     run_jobs(int(l.size()), [&](int i) { *l[size_t(i)].dst = load_png(dir + "/" + l[size_t(i)].name); }, threaded);
-    if (share) a.treadle = cairo_surface_reference(other->treadle);
+    if (share) {
+        a.treadle = cairo_surface_reference(other->treadle);
+        for (int k = 0; k < 3; ++k) a.knob[k] = cairo_surface_reference(other->knob[k]);
+    }
     bool ok = sized(a.treadle, TREADLE_X1 - TREADLE_X0, (TREADLE_Y1 - TREADLE_Y0) * TREADLE_FRAMES);
+    for (int k = 0; k < 3; ++k)
+        ok &= sized(a.knob[k], KNOBS[k].x1 - KNOBS[k].x0, (KNOBS[k].y1 - KNOBS[k].y0) * KNOBS[k].frames);
     for (const LoadJob& j : l) ok &= sized(*j.dst, j.w, j.h);
     a.ok = ok;
     return a;
@@ -254,7 +260,7 @@ inline void ensure_scaled(Scaled& s, const Assets& a, double f, bool threaded = 
 
 struct View {
     double drive = 0.5, level = 0.5, tone = 0.5;   // knob positions, 0..1
-    int    green = GREEN_OD9;
+    int    green = GREEN_VH9;
     double lit = 1.0;          // 1 active plate, 0 bypass plate; in between while crossfading
     double treadle = 0.0;      // 0 rest .. 1 pressed
     double hq_press = 0.0;     // the HQ button: 0 rest .. 1 pressed
@@ -282,7 +288,7 @@ inline void set_hex(cairo_t* cr, unsigned hex, double alpha)
 // scale 1 they are thinner than a pixel and antialiasing never reaches the colour, so a
 // fill alone reads dark. `DOT_STROKE_PX` per unit of UI scale is the same the variant list uses.
 // Font size of the readout, in scene mm: calibrated against the scene's own render of the
-// display (ink height 21 asset px on the OD-9 plate), not chosen by eye.
+// display (ink height 21 asset px on the VH-9 plate), not chosen by eye.
 inline constexpr double TEXT_MM = 3.66;
 inline constexpr double DOT_STROKE_PX = 0.9;
 

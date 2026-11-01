@@ -46,7 +46,7 @@
     # micro version, or minor version zero, indicates that the resource is a
     # development version".
     lv2:minorVersion 6 ;
-    lv2:microVersion 2 ;
+    lv2:microVersion 4 ;
 
     lv2:optionalFeature lv2:hardRTCapable ;
 
@@ -100,7 +100,7 @@
         # on stomp, so a straight-through dry signal would come out early
         # and comb-filter in a parallel mix.
         #
-        # It does not switch dry: a 512-sample fade (~10,7 ms at 48 kHz)
+        # It does not switch dry: a 512-sample fade (~10.7 ms at 48 kHz)
         # runs both ways. The engine is biased (its resting output is not
         # zero), so a hard switch would be audible even with no signal.
         a lv2:ControlPort, lv2:InputPort ;
@@ -118,7 +118,7 @@
         # Keen's table, the board photo in Wampler's book (p. 255) and the
         # netlist.
         #
-        # The OD-9 row stands for three boxes that are electrically identical in this model
+        # The VH-9 row stands for three boxes that are electrically identical in this model
         # (only the opamp would separate them, and there is no macromodel
         # for it), so they share one circuit.
         #
@@ -133,23 +133,23 @@
         lv2:portProperty lv2:integer, lv2:enumeration ;
         # The labels are `src/nls_variantes.h`'s, letter for letter. This
         # file cannot include the header, so both must be edited together.
-        lv2:scalePoint [ rdfs:label "OD-8 W Tone" ; rdf:value 0 ] ;
-        lv2:scalePoint [ rdfs:label "OD-9 W Tone"        ; rdf:value 1 ] ;
-        # Not a new circuit: the OD-8's, with the tone knob's travel
+        lv2:scalePoint [ rdfs:label "VH-8 W Tone" ; rdf:value 0 ] ;
+        lv2:scalePoint [ rdfs:label "VH-9 W Tone"        ; rdf:value 1 ] ;
+        # Not a new circuit: the VH-8's, with the tone knob's travel
         # redistributed so the dB come out even across the sweep. The circuit
         # concentrates its tone effect in the pot's last quarter (the last
-        # tenth carries 67,2 % of the range) and the real G taper aggravates
+        # tenth carries 67.2 % of the range) and the real G taper aggravates
         # it; this law spreads it. On this row the knob position does not
         # correspond to the real pot's rotation, which is why the faithful
         # rows keep the pot's taper and this one is its own entry.
-        lv2:scalePoint [ rdfs:label "OD-8 L Tone" ; rdf:value 2 ] ;
+        lv2:scalePoint [ rdfs:label "VH-8 L Tone" ; rdf:value 2 ] ;
         # The same law over the other circuit: the rows are a circuit times a
         # knob law, so both circuits get both laws. One table serves both: the
         # tone stage does not depend on the variant.
-        lv2:scalePoint [ rdfs:label "OD-9 L Tone" ; rdf:value 3 ]
+        lv2:scalePoint [ rdfs:label "VH-9 L Tone" ; rdf:value 3 ]
 
     ] , [
-        # Appended after 1.4.2 (ValveHowler#20): a new port goes at the end,
+        # Appended after 1.4.2: a new port goes at the end,
         # so no saved session moves to another index.
         a lv2:ControlPort, lv2:InputPort ;
         lv2:index 8 ; lv2:symbol "hq" ; lv2:name "HQ" ;

@@ -24,15 +24,9 @@
 // System V ABI makes exact (the pointer travels in the same register, the int
 // result is discarded). A wrapper of the right type would be code in THIS
 // module, which is what crashed.
-//
-// NLSC_UI_FONTS_FT_CALLBACK=1 restores the old fonts (one shared library, a
-// release wrapper in the module), for the gate's negative arm only.
 
 #pragma once
 
-#ifndef NLSC_UI_FONTS_FT_CALLBACK
-#define NLSC_UI_FONTS_FT_CALLBACK 0
-#endif
 
 #include <cairo/cairo.h>
 #include <cairo/cairo-ft.h>
@@ -52,68 +46,6 @@ struct Fonts {
     bool ok = false;                     // true only if the face loaded
 };
 
-#if NLSC_UI_FONTS_FT_CALLBACK
-// Key the FT_Face hangs from on its Cairo face, for destruction.
-inline cairo_user_data_key_t* ft_face_key()
-{
-    static cairo_user_data_key_t key;
-    return &key;
-}
-
-// A wrapper instead of `reinterpret_cast`-ing `FT_Done_Face`: Cairo
-// wants a `void(*)(void*)` and FreeType gives an `FT_Error(*)(FT_Face)`.
-// Converting between incompatible function types and calling through the
-// converted pointer is UB, and GCC flags it with `-Wcast-function-type`.
-extern "C" inline void release_ft_face(void* p)
-{
-    if (p) FT_Done_Face(static_cast<FT_Face>(p));
-}
-
-inline cairo_font_face_t* load_face_ft(FT_Library ft, const std::string& path)
-{
-    FT_Face face = nullptr;
-    if (FT_New_Face(ft, path.c_str(), 0, &face) != 0) return nullptr;
-    cairo_font_face_t* cf = cairo_ft_font_face_create_for_ft_face(face, 0);
-    if (cairo_font_face_status(cf) != CAIRO_STATUS_SUCCESS) {
-        cairo_font_face_destroy(cf);
-        FT_Done_Face(face);
-        return nullptr;
-    }
-    // The FT_Face's life is tied to the Cairo face: destroying it calls
-    // FT_Done_Face. If that wiring fails, clean up by hand.
-    if (cairo_font_face_set_user_data(cf, ft_face_key(), face, release_ft_face)
-        != CAIRO_STATUS_SUCCESS) {
-        cairo_font_face_destroy(cf);
-        FT_Done_Face(face);
-        return nullptr;
-    }
-    return cf;
-}
-
-// One FT_Library per process, opened once and never closed.
-//
-// `cairo_font_face_destroy()` does not destroy the face: it drops our reference.
-// Cairo keeps its own inside a process-wide scaled-font cache, so the user-data
-// callback that calls `FT_Done_Face` does not run when we ask it to. Closing the
-// library then would tear it down under faces cairo still holds, and the next
-// instance (a host reopening the plugin window) would crash inside
-// `cairo_text_extents` -> `FT_Set_Transform` on a dangling face.
-//
-// The library is a few KB and its lifetime cannot be shorter than a cache we do
-// not own, so it lasts as long as the process. Each face is still released
-// whenever cairo drops it.
-inline FT_Library shared_ft()
-{
-    static FT_Library ft = nullptr;
-    static bool tried = false;
-    if (!tried) {
-        tried = true;
-        if (FT_Init_FreeType(&ft) != 0) ft = nullptr;
-    }
-    return ft;
-}
-
-#endif
 
 // Key the private FT_Library hangs from on its Cairo face.
 inline cairo_user_data_key_t* ft_library_key()
@@ -125,10 +57,6 @@ inline cairo_user_data_key_t* ft_library_key()
 // One face from one bundled file, owning its own FreeType library (see the top).
 inline cairo_font_face_t* load_face(const std::string& path)
 {
-#if NLSC_UI_FONTS_FT_CALLBACK
-    FT_Library ft = shared_ft();
-    return ft ? load_face_ft(ft, path) : nullptr;
-#else
     FT_Library lib = nullptr;
     if (FT_Init_FreeType(&lib) != 0) return nullptr;
     FT_Face face = nullptr;
@@ -139,6 +67,8 @@ inline cairo_font_face_t* load_face(const std::string& path)
         FT_Done_FreeType(lib);
         return nullptr;
     }
+    // FreeType's own function as the destroy callback, not a wrapper of ours:
+    // see the top of this file.
     if (cairo_font_face_set_user_data(cf, ft_library_key(), lib,
                                       reinterpret_cast<cairo_destroy_func_t>(
                                           reinterpret_cast<void (*)()>(&FT_Done_FreeType)))
@@ -148,16 +78,30 @@ inline cairo_font_face_t* load_face(const std::string& path)
         return nullptr;
     }
     return cf;
-#endif
 }
 
-// Loads the face from `dir`: the running LV2 bundle's path, or
-// `assets/fonts` for the standalone preview.
+struct SharedFace {
+    std::string path;
+    cairo_font_face_t* face = nullptr;
+    ~SharedFace() { if (face) cairo_font_face_destroy(face); }
+};
+
+inline cairo_font_face_t* shared_face(const std::string& path)
+{
+    static SharedFace s;
+    if (!s.face || s.path != path) {
+        if (s.face) cairo_font_face_destroy(s.face);
+        s.face = load_face(path);
+        s.path = path;
+    }
+    return s.face ? cairo_font_face_reference(s.face) : nullptr;
+}
+
 inline Fonts load_fonts(const std::string& dir)
 {
     Fonts f;
     const std::string base = dir.empty() ? "." : dir;
-    f.doto = load_face(base + "/Doto-Round-Bold.ttf");
+    f.doto = shared_face(base + "/Doto-Round-Bold.ttf");
     f.ok = f.doto != nullptr;
     return f;
 }

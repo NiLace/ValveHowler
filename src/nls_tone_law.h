@@ -7,7 +7,7 @@
 // selector. Both drive the same circuit; what changes is which part of
 // the pot's physical travel each knob position is given.
 //
-// The OD-8 circuit's tone control concentrates its effect in the pot's last
+// The VH-8 circuit's tone control concentrates its effect in the pot's last
 // quarter: with the real pot's law, from knob 0.1 to 0.8 the brightness
 // moves −0.13 dB while the last tenth is worth +11 dB (2947 to 1
 // between the most and least effective tenth). That is the circuit,

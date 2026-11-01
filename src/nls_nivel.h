@@ -24,7 +24,7 @@
 
 #include "nls_filtro_param.h"
 #include "nls_level_coef.h"
-#include "nls_level_coef_od9.h"   // the variant's bank, see `prepare`
+#include "nls_level_coef_vh9.h"   // the variant's bank, see `prepare`
 
 namespace nlsc {
 
@@ -47,10 +47,10 @@ namespace nlsc {
 // used instead.
 class OpenBaseLevel {
 public:
-    static_assert(level::kDegreeNumO == level_od9::kDegreeNumO &&
-                  level::kDegreeDenO == level_od9::kDegreeDenO &&
-                  level::kKnobDegO == level_od9::kKnobDegO &&
-                  level::kDegreeNumZ == level_od9::kDegreeNumZ,
+    static_assert(level::kDegreeNumO == level_vh9::kDegreeNumO &&
+                  level::kDegreeDenO == level_vh9::kDegreeDenO &&
+                  level::kKnobDegO == level_vh9::kKnobDegO &&
+                  level::kDegreeNumZ == level_vh9::kDegreeNumZ,
                   "both open-base banks must share the same degrees");
 
     // `J` is the variant's bank (`nls_juegos.h`). The template instantiates
@@ -114,9 +114,9 @@ public:
     // R13, is 10 k in both models. In ngspice `n19/n14` separates by
     // +0,07 dB flat and +0,28 dB at 10 Hz between the two variants. It is
     // only read in `prepare()`, so choosing the table suffices.
-    static_assert(level::kDegreeNum == level_od9::kDegreeNum &&
-                  level::kDegreeDen == level_od9::kDegreeDen &&
-                  level::kKnobDeg == level_od9::kKnobDeg,
+    static_assert(level::kDegreeNum == level_vh9::kDegreeNum &&
+                  level::kDegreeDen == level_vh9::kDegreeDen &&
+                  level::kKnobDeg == level_vh9::kKnobDeg,
                   "both level banks must share the same degrees");
 
     template <class J>
@@ -136,9 +136,9 @@ private:
 // exact superposition.
 class RailN19Variable {
 public:
-    static_assert(level::kDegreeNumR == level_od9::kDegreeNumR &&
-                  level::kDegreeDenR == level_od9::kDegreeDenR &&
-                  level::kKnobDegR == level_od9::kKnobDegR,
+    static_assert(level::kDegreeNumR == level_vh9::kDegreeNumR &&
+                  level::kDegreeDenR == level_vh9::kDegreeDenR &&
+                  level::kKnobDegR == level_vh9::kKnobDegR,
                   "both level-rail banks must share the same degrees");
 
     template <class J>

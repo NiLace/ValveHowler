@@ -30,7 +30,7 @@ static constexpr double kFs = 192000.0;
 //
 // Which rate's bank is compiled is chosen by NLSC_CASC_KHZ in
 //   nls_cascada.h: default build -> nls_e234_coef.h and
-//   nls_e234_coef_od9_384k.h; 192 -> the *_192k.h pair. The two lists below hold
+//   nls_e234_coef_vh9_384k.h; 192 -> the *_192k.h pair. The two lists below hold
 //   for the bank being compiled.
 // Read by the engine: kFs · kQ_vr · kQ_n3 · kQ_n4 · kQ_n7 · kQ_n11 ·
 //   kQ_n14 · kQ_n19 · kQ_out · kG_* · kWS2*  (nls_juegos.h and

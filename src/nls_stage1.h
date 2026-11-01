@@ -42,16 +42,16 @@
 #include "nls_fijos_s.h"
 #include "nls_reposo_drive.h"
 
-// The second bank, the OD-9 variant's. It is always included: the user
+// The second bank, the VH-9 variant's. It is always included: the user
 // picks the variant at run time, so both banks are compiled in. Which
 // tabulated set is included follows the rate selector above (see there).
 #if defined(NLSC_CASC_KHZ) && NLSC_CASC_KHZ == 192
-#  include "nls_stage1_coef_od9_192k.h"
+#  include "nls_stage1_coef_vh9_192k.h"
 #else
-#  include "nls_stage1_coef_od9_384k.h"
+#  include "nls_stage1_coef_vh9_384k.h"
 #endif
-#include "nls_fijos_s_od9.h"
-#include "nls_reposo_drive_od9.h"
+#include "nls_fijos_s_vh9.h"
+#include "nls_reposo_drive_vh9.h"
 
 namespace nlsc {
 
@@ -61,7 +61,7 @@ inline constexpr int kWSMax = 24;
 
 class Stage1 {
 public:
-    // Starts with the OD-8's bank, so the class is usable without calling
+    // Starts with the VH-8's bank, so the class is usable without calling
     // `prepare()`.
     Stage1()
     {
@@ -138,14 +138,14 @@ public:
     // Both banks must share the filters' orders, because `FixedFilter<NB,NA>`
     // is a template and there is one member per filter. If they diverge,
     // this does not compile.
-    static_assert(fixed::kH1_NB == fixed_od9::kH1_NB &&
-                  fixed::kH1_NA == fixed_od9::kH1_NA &&
-                  fixed::kHS_NB == fixed_od9::kHS_NB &&
-                  fixed::kHS_NA == fixed_od9::kHS_NA &&
-                  fixed::kH2_NB == fixed_od9::kH2_NB &&
-                  fixed::kH2_NA == fixed_od9::kH2_NA,
+    static_assert(fixed::kH1_NB == fixed_vh9::kH1_NB &&
+                  fixed::kH1_NA == fixed_vh9::kH1_NA &&
+                  fixed::kHS_NB == fixed_vh9::kHS_NB &&
+                  fixed::kHS_NA == fixed_vh9::kHS_NA &&
+                  fixed::kH2_NB == fixed_vh9::kH2_NB &&
+                  fixed::kH2_NA == fixed_vh9::kH2_NA,
                   "both stage-1 banks must share the same filter orders");
-    static_assert(stage1::kWS_N <= kWSMax && stage1_od9::kWS_N <= kWSMax,
+    static_assert(stage1::kWS_N <= kWSMax && stage1_vh9::kWS_N <= kWSMax,
                   "kWSMax is too small for stage 1's waveshaper");
 
     // Loads the variant's bank, copied into members because it is read per
@@ -159,7 +159,7 @@ public:
         for (int i = 0; i < ws_n_; ++i) ws_[i] = J::WS[i];
 // `NLSC_WS_RECENTER` (off by default) zeroes the waveshaper's independent
 // term. The fit does not pass exactly through the origin (Q1: +9.14 uV on
-// the OD-8), so at start-up, with every filter state at zero, it injects a
+// the VH-8), so at start-up, with every filter state at zero, it injects a
 // constant step that the stage high-passes take hundreds of ms to wash out.
 #if NLSC_WS_RECENTER
         ws_[ws_n_ - 1] = 0.0;
@@ -236,7 +236,7 @@ private:
     double off_n3_ = 0.0, off_n6_ = 0.0, q_n4_ = kVr;
 
     // Copy of the active variant's bank, read per sample. The constructor
-    // loads the OD-8's, so the class is usable without calling `prepare()`.
+    // loads the VH-8's, so the class is usable without calling `prepare()`.
     double ws_[kWSMax] = {0.0};
     int    ws_n_ = stage1::kWS_N;
     // The fit's travel comes from the bank: each variant fits its own curve

@@ -110,10 +110,10 @@ Four rows, and they are two circuits crossed with two laws for the tone knob:
 
 | | |
 |---|---|
-| **OD-8 W Tone** | the earlier output pair, with the real pot's taper |
-| **OD-9 W Tone** | the later output pair, with the real pot's taper |
-| **OD-8 L Tone** | the earlier output pair, with the tone travel evened out |
-| **OD-9 L Tone** | the later output pair, with the tone travel evened out |
+| **VH-8 W Tone** | the earlier output pair, with the real pot's taper |
+| **VH-9 W Tone** | the later output pair, with the real pot's taper |
+| **VH-8 L Tone** | the earlier output pair, with the tone travel evened out |
+| **VH-9 L Tone** | the later output pair, with the tone travel evened out |
 
 The two **circuits** differ in the pair of resistors at the output. It is a subtle
 difference — a slightly different output level and load — not a different pedal.
@@ -158,7 +158,8 @@ uninstall, delete the folder. If your host scans a different location, extract
 there instead (the system-wide path is usually `/usr/lib/lv2` or
 `/usr/local/lib/lv2`).
 
-The bundle is a 64-bit x86 build for Linux. What changed in each version is listed
+The bundle is a 64-bit x86 build for Linux, and needs glibc 2.29 or newer (any
+distribution from 2019 on). What changed in each version is listed
 in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Building from source

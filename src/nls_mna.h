@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) The NL Sounds contributors
-// The OD-8 circuit's MNA engine: modified nodal analysis + Newton per sample.
+// The VH-8 circuit's MNA engine: modified nodal analysis + Newton per sample.
 //
 // A port of a 33-unknown prototype that was validated against ngspice: rest
 // point within 1.82 µV, output null −82.5 dB with 8x oversampling and
@@ -235,11 +235,11 @@ struct Netlist {
     // (`nls_dk_elim_gen.h`) remain valid.
     //
     // Three independent sources agree on it: a published variant table, a
-    // pedal-modification book that marks them on a photo of the board (`OD-8-1` =
-    // 100 Ω and `OD-8-2` = 10 kΩ, p. 255), and the netlist itself, which carries
-    // the factory OD-8. The table's third circuit (an extra R at position `RA`)
+    // pedal-modification book that marks them on a photo of the board (`VH-8-1` =
+    // 100 Ω and `VH-8-2` = 10 kΩ, p. 255), and the netlist itself, which carries
+    // the factory VH-8. The table's third circuit (an extra R at position `RA`)
     // needs a new element and its value is disputed between sources (1 kΩ or
-    // 220 Ω), so it is not exposed. The defaults are the OD-8's.
+    // 220 Ω), so it is not exposed. The defaults are the VH-8's.
     double rout_ser = 100.0, rout_shunt = 10e3;
 
     // The parasitics are added in `buildConstant()` and in

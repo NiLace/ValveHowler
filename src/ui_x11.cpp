@@ -103,13 +103,6 @@ constexpr double WHEEL_STEP  = 0.02;
 
 // There is no frame-rate cap: see `ui_idle`.
 
-// Negative arms of the HQ gate (`make ui-hq`), for test builds only:
-// NLSC_UI_HQ_MUTANT=1 toggles the button's light on a click without writing the port;
-// NLSC_UI_HQ_MUTANT=2 ignores the host's `hq` value; NLSC_UI_HQ_MUTANT=3 lets HQ be
-// clicked in bypass.
-#ifndef NLSC_UI_HQ_MUTANT
-#define NLSC_UI_HQ_MUTANT 0
-#endif
 
 
 // --- the variant dropdown ----------------------------------------------------
@@ -137,6 +130,7 @@ struct UI {
     int      depth  = 0;                // the parent's; the popup uses it too
     Colormap cmap   = 0;                // ours, when the parent's visual is not the default
     bool     x_dead = false;            // our connection is gone: no X call any more, the host closes us
+    bool     win_gone = false;          // our window was destroyed with its parent: no paint, no destroy
     cairo_surface_t* surf = nullptr;
     cairo_t*         cr   = nullptr;
 
@@ -261,7 +255,7 @@ bool hit_footswitch(const UI* ui, double px, double py)
 // button is dark and a click on it does nothing.
 bool hit_hq(const UI* ui, double px, double py)
 {
-    if (!ui->on && NLSC_UI_HQ_MUTANT != 3) return false;
+    if (!ui->on) return false;
     double x, y; to_asset(ui, px, py, &x, &y);
     return photo::in_box(photo::HQ_HIT, x, y);
 }
@@ -341,14 +335,12 @@ void set_variant(UI* ui, int idx)
 void toggle_hq(UI* ui)
 {
     ui->hq = !ui->hq;
-    if (NLSC_UI_HQ_MUTANT != 1) {
-        notify_touch(ui, PORT_HQ, true);
-        if (ui->write) {
-            float pv = ui->hq ? 1.0f : 0.0f;
-            ui->write(ui->ctl, PORT_HQ, sizeof(float), 0, &pv);
-        }
-        notify_touch(ui, PORT_HQ, false);
+    notify_touch(ui, PORT_HQ, true);
+    if (ui->write) {
+        float pv = ui->hq ? 1.0f : 0.0f;
+        ui->write(ui->ctl, PORT_HQ, sizeof(float), 0, &pv);
     }
+    notify_touch(ui, PORT_HQ, false);
     start_glow(ui);
 }
 
@@ -519,22 +511,11 @@ void popup_open(UI* ui)
     popup_paint(ui);
 }
 
-// The list is a window of the ROOT holding the pointer and keyboard grabs, and X tells a child
-// nothing when its PARENT is unmapped or moved (VisibilityNotify, FocusOut and ConfigureNotify
-// fire nothing either): a host hiding or moving the editor would leave the list floating and
-// the grabs held. So while it is open, our window is watched once per idle turn (two round
-// trips, only while open): no longer in the map state it had when the list opened, or no
-// longer at the same root position, and the list closes.
-// NLSC_UI_POPUP_NO_WATCH=1 restores the list that outlives a hidden editor, for the gate's
-// negative arm only (harness/test_ui_parent.cpp).
-#ifndef NLSC_UI_POPUP_NO_WATCH
-#define NLSC_UI_POPUP_NO_WATCH 0
-#endif
 
 void popup_watch(UI* ui)
 {
     Popup& p = ui->popup;
-    if (!p.is_open || NLSC_UI_POPUP_NO_WATCH) return;
+    if (!p.is_open) return;
     XWindowAttributes wa;
     int x = 0, y = 0;
     Window child = 0;
@@ -601,33 +582,6 @@ bool popup_on_event(UI* ui, XEvent* ev)
 
 // --- the decoded images, shared by every instance in the process --------------
 
-// Decoding the bundle's PNGs is most of the cost of opening the editor, and every instance
-// decodes the same files. So they are decoded once, per green, into a process-wide cache under
-// a mutex (an instance opening during another's decode waits for it instead of decoding
-// again). The cache counts its users and is NOT freed when the last one closes: a host that
-// closes and reopens the editor reopens it without decoding. It is freed by the cache's
-// destructor when the process ends, or when a build of this module without -z nodelete is
-// unloaded; no instance is alive then, because a host destroys its UIs before unloading their
-// library. One cache holds one bundle's images: an instance from another bundle, while the
-// cache is in use, decodes its own copy.
-//
-// Negative arms of the gates, for test builds only: NLSC_UI_NO_SHARED_CACHE=1 decodes per
-// instance; NLSC_UI_DROP_ORIGINALS=1 also lets the decoded images go once scaled (a new window
-// size decodes again); NLSC_UI_CACHE_ONE_GREEN=1 keys the cache without the green (the other
-// circuit paints the first one's images); NLSC_UI_KEEP_IMAGES_AT_UNLOAD=1 leaves the cache
-// allocated when the module is unloaded (harness/test_ui_images.cpp, harness/test_ui_unload.cpp).
-#ifndef NLSC_UI_NO_SHARED_CACHE
-#define NLSC_UI_NO_SHARED_CACHE 0
-#endif
-#ifndef NLSC_UI_DROP_ORIGINALS
-#define NLSC_UI_DROP_ORIGINALS 0
-#endif
-#ifndef NLSC_UI_CACHE_ONE_GREEN
-#define NLSC_UI_CACHE_ONE_GREEN 0
-#endif
-#ifndef NLSC_UI_KEEP_IMAGES_AT_UNLOAD
-#define NLSC_UI_KEEP_IMAGES_AT_UNLOAD 0
-#endif
 
 struct ImageCache {
     std::mutex    mx;
@@ -636,7 +590,7 @@ struct ImageCache {
     int           users = 0;
     ~ImageCache()
     {
-        if (!NLSC_UI_KEEP_IMAGES_AT_UNLOAD) for (auto& a : set) photo::free_assets(a);
+        for (auto& a : set) photo::free_assets(a);
     }
 };
 ImageCache g_images;
@@ -646,14 +600,14 @@ ImageCache g_images;
 bool scale_images(UI* ui, int g)
 {
     const double f = asset_scale(ui);
-    if (!NLSC_UI_NO_SHARED_CACHE && !NLSC_UI_DROP_ORIGINALS) {
+    {
         std::lock_guard<std::mutex> lock(g_images.mx);
         if (g_images.users == 0 && g_images.dir != ui->photo_dir) {
             for (auto& a : g_images.set) photo::free_assets(a);
             g_images.dir = ui->photo_dir;
         }
         if (g_images.dir == ui->photo_dir) {
-            const int slot = NLSC_UI_CACHE_ONE_GREEN ? 0 : g;
+            const int slot = g;
             photo::Assets& a = g_images.set[slot];
             if (!a.ok) {
                 photo::free_assets(a);
@@ -674,7 +628,6 @@ bool scale_images(UI* ui, int g)
         if (!a.ok) { photo::free_assets(a); return false; }
     }
     photo::ensure_scaled(ui->scaled, a, f);
-    if (NLSC_UI_DROP_ORIGINALS) for (auto& o : ui->own) photo::free_assets(o);
     return true;
 }
 
@@ -750,11 +703,17 @@ void paint(UI* ui)
 void on_event(UI* ui, XEvent* ev)
 {
     switch (ev->type) {
+        case DestroyNotify:
+            if (ev->xdestroywindow.window == ui->win) ui->win_gone = true;
+            break;
+
         case Expose:
             if (ev->xexpose.count == 0) ui->needs_paint = true;
             break;
 
         case ConfigureNotify: {
+            // The editor is fixed size (ui:noUserResize, honoured by the hosts that matter);
+            // a host that sizes the window anyway still gets a drawing fitted to it.
             const int nw = ev->xconfigure.width, nh = ev->xconfigure.height;
             if (nw != ui->w || nh != ui->h) {
                 ui->w = nw; ui->h = nh;
@@ -865,42 +824,7 @@ void on_event(UI* ui, XEvent* ev)
 
 // --- LV2UI entry points -------------------------------------------------------
 
-// X errors. Xlib's default handler exit()s the whole process -- the host -- on
-// any protocol error, and a parent window whose visual we do not match (a
-// 32-bit ARGB parent) or one the server does not know raises one. While any
-// instance of this UI is alive, a handler records errors on our connections and
-// hands every other error to whatever handler was installed before (the host's).
-// The handler is process-wide by Xlib's design: it is installed ONCE per
-// process, with the first instance, and never put back. Putting the previous one
-// back with the last instance makes a cycle after a close and a reopen: a
-// handler installed after ours (or a second copy of this code, another pedal of
-// the family) chains to ours, and the reopen takes that handler as "previous" --
-// the host's next X error then loops for ever. Leaving ours installed is safe
-// only because the module is never unloaded: it is linked -z nodelete.
-// NLSC_UI_PARENT_VISUAL=0 builds a plain window with the default visual and no
-// error handler; NLSC_UI_RESTORE_HANDLERS=1 installs the handler with the first
-// instance and puts the previous one back with the last. Both are for the gates'
-// negative arms only (harness/test_ui_parent.cpp, harness/test_ui_cycle.c).
-// The family shield (shared with src/nls_x_shield.h): with two
-// pedals of the family loaded, both editors closed and the handlers reset to
-// Xlib's default by another library, A reopened and then B: B finds A's handler
-// in place and leaves it, so B's errors reach A's handler, which does not know
-// B's connections. Each editor therefore MARKS its connection (an Xlib context
-// entry under a name every family editor shares, pointing to the error flag of
-// the library that opened it), a handler looks the mark up for a connection it
-// does not know, and every open re-installs ours when the current handler IS
-// Xlib's default. NLSC_UI_FAMILY_SHIELD=0: the shield private to this library.
-#ifndef NLSC_UI_PARENT_VISUAL
-#define NLSC_UI_PARENT_VISUAL 1
-#endif
-#ifndef NLSC_UI_RESTORE_HANDLERS
-#define NLSC_UI_RESTORE_HANDLERS 0
-#endif
-#ifndef NLSC_UI_FAMILY_SHIELD
-#define NLSC_UI_FAMILY_SHIELD 1
-#endif
 
-#if NLSC_UI_PARENT_VISUAL
 // Our connections are tracked in a list with no fixed size: an instance that
 // could not be tracked would hand its own errors to the host's handler, so when
 // the list cannot grow the instance is refused instead. The globals are not
@@ -911,28 +835,8 @@ Display** g_ui_displays = nullptr;
 int  g_ui_ndisplays = 0, g_ui_cap = 0;
 int  g_x_error = 0;                // an int: the family shield's record points to it
 bool g_handler_installed = false;
-#if NLSC_UI_FAMILY_SHIELD
 NlsXsRecord g_xs_record = { 0, &g_x_error };
-#endif
 
-// I/O errors take two handlers in Xlib: the process-wide one runs first and, by
-// default, exit()s the process -- the host; the per-connection exit handler
-// (ui_io_exit, libX11 1.7 and later) runs after it. Our process-wide handler,
-// installed once with the X error one and never put back, returns for OUR
-// connections (the exit handler then marks the instance dead, and the host is
-// asked to close it) and hands every other connection's error to the handler
-// installed before it: the host's own I/O errors behave as without us. On a
-// libX11 older than 1.7 Xlib still exits after ours returns.
-// NLSC_UI_NO_IO_EXIT=1 leaves Xlib's default I/O handling, and
-// NLSC_UI_SHIELD_CAP > 0 restores a fixed-size list that silently leaves the
-// extra connections untracked: both for the gates' negative arms only
-// (harness/test_ui_shield.c).
-#ifndef NLSC_UI_NO_IO_EXIT
-#define NLSC_UI_NO_IO_EXIT 0
-#endif
-#ifndef NLSC_UI_SHIELD_CAP
-#define NLSC_UI_SHIELD_CAP 0
-#endif
 int (*g_prev_io_handler)(Display*) = nullptr;
 
 bool is_ours(Display* d)
@@ -945,22 +849,39 @@ bool is_ours(Display* d)
 int ui_x_error(Display* d, XErrorEvent* e)
 {
     if (is_ours(d)) { g_x_error = true; return 0; }
-#if NLSC_UI_FAMILY_SHIELD
     if (NlsXsRecord* r = nls_xs_find(d)) { *r->flag = 1; return 0; }   // another family editor's connection
-#endif
     return g_prev_x_handler ? g_prev_x_handler(d, e) : 0;
 }
 
 int ui_io_error(Display* d)
 {
     if (is_ours(d)) return 0;
-#if NLSC_UI_FAMILY_SHIELD
     if (nls_xs_find(d)) return 0;      // its own exit handler marks that editor dead
-#endif
     return g_prev_io_handler ? g_prev_io_handler(d) : 0;
 }
 
 void ui_io_exit(Display*, void* user) { static_cast<UI*>(user)->x_dead = true; }
+
+// Xlib's own handlers, learned once (setting NULL installs the default and returns what was there).
+int (*g_x_default)(Display*, XErrorEvent*) = nullptr;
+int (*g_io_default)(Display*) = nullptr;
+
+// Ours goes in over Xlib's default; any other handler (maybe chaining to ours) is left in place. Run at every
+// instantiate, and again at every idle and at cleanup: a library that puts Xlib's default back after we installed
+// ours would let our own X errors reach it, and the default exit()s the host. That happens on close when the parent
+// is destroyed before cleanup (suil's order): the editor's last calls hit a dead window.
+void assert_handlers()
+{
+    if (!g_x_default) { auto c = XSetErrorHandler(nullptr); g_x_default = XSetErrorHandler(c); }
+    auto cur = XSetErrorHandler(ui_x_error);
+    if (!g_handler_installed || cur == g_x_default) g_prev_x_handler = cur;
+    else if (cur != ui_x_error) XSetErrorHandler(cur);
+    if (!g_io_default) { auto c = XSetIOErrorHandler(nullptr); g_io_default = XSetIOErrorHandler(c); }
+    auto cur_io = XSetIOErrorHandler(ui_io_error);
+    if (!g_handler_installed || cur_io == g_io_default) g_prev_io_handler = cur_io;
+    else if (cur_io != ui_io_error) XSetIOErrorHandler(cur_io);
+    g_handler_installed = true;
+}
 
 // false when the list cannot grow (the caller then refuses the instance)
 bool track_display(Display* d, bool add)
@@ -971,7 +892,6 @@ bool track_display(Display* d, bool add)
         if (g_ui_ndisplays == 0) { std::free(g_ui_displays); g_ui_displays = nullptr; g_ui_cap = 0; }
         return true;
     }
-    if (NLSC_UI_SHIELD_CAP > 0 && g_ui_ndisplays >= NLSC_UI_SHIELD_CAP) return true;
     if (g_ui_ndisplays == g_ui_cap) {
         const int cap = g_ui_cap ? 2 * g_ui_cap : 8;
         auto* grown = static_cast<Display**>(std::realloc(g_ui_displays, size_t(cap) * sizeof(Display*)));
@@ -982,7 +902,6 @@ bool track_display(Display* d, bool add)
     g_ui_displays[g_ui_ndisplays++] = d;
     return true;
 }
-#endif
 
 void cleanup(LV2UI_Handle handle);
 
@@ -1035,9 +954,7 @@ LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundl
 
     ui->dpy = XOpenDisplay(nullptr);
     if (!ui->dpy) { delete ui; return nullptr; }
-#if NLSC_UI_PARENT_VISUAL
-    if (!NLSC_UI_NO_IO_EXIT && XSetIOErrorExitHandler) XSetIOErrorExitHandler(ui->dpy, ui_io_exit, ui);
-#endif
+    if (XSetIOErrorExitHandler) XSetIOErrorExitHandler(ui->dpy, ui_io_exit, ui);
 
     const int screen = DefaultScreen(ui->dpy);
     ui->visual = DefaultVisual(ui->dpy, screen);
@@ -1045,36 +962,12 @@ LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundl
     ui->root   = RootWindow(ui->dpy, screen);
     ui->parent = parent ? parent : ui->root;
 
-#if NLSC_UI_PARENT_VISUAL
     if (!track_display(ui->dpy, true)) { XCloseDisplay(ui->dpy); delete ui; return nullptr; }
-#if NLSC_UI_FAMILY_SHIELD
-    // a connection NLSC_UI_SHIELD_CAP's arm left out of the list stays unmarked too (the arm must see it unshielded)
-    if (!(NLSC_UI_SHIELD_CAP > 0 && !is_ours(ui->dpy)) && nls_xs_mark(ui->dpy, &g_xs_record)) {
+    if (nls_xs_mark(ui->dpy, &g_xs_record)) {
         track_display(ui->dpy, false); XCloseDisplay(ui->dpy); delete ui; return nullptr;
     }
-#endif
-    if (NLSC_UI_FAMILY_SHIELD && !NLSC_UI_RESTORE_HANDLERS) {
-        ++g_ui_instances;
-        // every open: Xlib's own handlers, learned once (setting NULL installs the default and returns what was
-        // there); ours goes in over the default, any other handler (maybe chaining to ours) is left in place
-        static int (*x_default)(Display*, XErrorEvent*) = nullptr;
-        static int (*io_default)(Display*) = nullptr;
-        if (!x_default) { auto c = XSetErrorHandler(nullptr); x_default = XSetErrorHandler(c); }
-        auto cur = XSetErrorHandler(ui_x_error);
-        if (!g_handler_installed || cur == x_default) g_prev_x_handler = cur;
-        else if (cur != ui_x_error) XSetErrorHandler(cur);
-        if (!NLSC_UI_NO_IO_EXIT) {
-            if (!io_default) { auto c = XSetIOErrorHandler(nullptr); io_default = XSetIOErrorHandler(c); }
-            auto cur_io = XSetIOErrorHandler(ui_io_error);
-            if (!g_handler_installed || cur_io == io_default) g_prev_io_handler = cur_io;
-            else if (cur_io != ui_io_error) XSetIOErrorHandler(cur_io);
-        }
-        g_handler_installed = true;
-    } else if (g_ui_instances++ == 0 && (NLSC_UI_RESTORE_HANDLERS || !g_handler_installed)) {
-        g_handler_installed = true;
-        g_prev_x_handler = XSetErrorHandler(ui_x_error);
-        if (!NLSC_UI_NO_IO_EXIT) g_prev_io_handler = XSetIOErrorHandler(ui_io_error);
-    }
+    ++g_ui_instances;
+    assert_handlers();
     g_x_error = false;
     // The window takes the parent's visual and depth, and so does the cairo
     // surface: a child of another depth cannot be drawn into its parent.
@@ -1099,26 +992,6 @@ LV2UI_Handle instantiate(const LV2UI_Descriptor*, const char*, const char* bundl
         ui->win = 0;
         cleanup(ui);
         return nullptr;
-    }
-#else
-    ui->win = XCreateSimpleWindow(ui->dpy, ui->parent, 0, 0,
-                                  (unsigned)ui->w, (unsigned)ui->h, 0,
-                                  BlackPixel(ui->dpy, screen),
-                                  BlackPixel(ui->dpy, screen));
-    if (!ui->win) { XCloseDisplay(ui->dpy); delete ui; return nullptr; }
-#endif
-
-    // Size hints for a host that resizes the plugin window: keep the pedal's
-    // proportions, never below half its size. The drawing fits whatever size it gets.
-    if (XSizeHints* sh = XAllocSizeHints()) {
-        sh->flags = PMinSize | PAspect | PBaseSize;
-        sh->min_width  = int(photo::LOGICAL_W / 2);
-        sh->min_height = int(photo::LOGICAL_H / 2);
-        sh->base_width = ui->w; sh->base_height = ui->h;
-        sh->min_aspect.x = sh->max_aspect.x = int(photo::ASSET_W);
-        sh->min_aspect.y = sh->max_aspect.y = int(photo::ASSET_H);
-        XSetWMNormalHints(ui->dpy, ui->win, sh);
-        XFree(sh);
     }
 
     XSelectInput(ui->dpy, ui->win,
@@ -1158,24 +1031,18 @@ void cleanup(LV2UI_Handle handle)
     if (ui->cr)       cairo_destroy(ui->cr);
     if (ui->surf)     cairo_surface_destroy(ui->surf);
     const bool live = ui->dpy && !ui->x_dead;
-    if (live && ui->win)  XDestroyWindow(ui->dpy, ui->win);
+    if (live) assert_handlers();
+    if (live && ui->win && !ui->win_gone)  XDestroyWindow(ui->dpy, ui->win);
     if (live && ui->cmap) XFreeColormap(ui->dpy, ui->cmap);
     if (ui->dpy) {
         // A dead connection is closed too, without the sync: Xlib skips the
         // server round trip on a connection that had its I/O error, and frees
         // the Display and its socket.
         if (live) XSync(ui->dpy, False);
-#if NLSC_UI_PARENT_VISUAL && NLSC_UI_FAMILY_SHIELD
         nls_xs_unmark(ui->dpy);
-#endif
         XCloseDisplay(ui->dpy);
-#if NLSC_UI_PARENT_VISUAL
         track_display(ui->dpy, false);
-        if (--g_ui_instances == 0 && NLSC_UI_RESTORE_HANDLERS) {
-            XSetErrorHandler(g_prev_x_handler);
-            if (!NLSC_UI_NO_IO_EXIT) XSetIOErrorHandler(g_prev_io_handler);
-        }
-#endif
+        --g_ui_instances;
     }
     delete ui;
 }
@@ -1200,7 +1067,6 @@ void port_event(LV2UI_Handle handle, uint32_t port, uint32_t buffer_size,
             if ((v >= 0.5f) != ui->on) { ui->on = (v >= 0.5f); start_fade(ui); }
             break;
         case PORT_HQ:
-            if (NLSC_UI_HQ_MUTANT == 2) return;
             if ((v >= 0.5f) != ui->hq) { ui->hq = (v >= 0.5f); start_glow(ui); }
             break;
         case PORT_VARIANT: {
@@ -1208,6 +1074,7 @@ void port_event(LV2UI_Handle handle, uint32_t port, uint32_t buffer_size,
             const float vc = std::fmin(float(nlsc::kNumVariants - 1), std::fmax(0.0f, v));
             const int idx = clampi(int(vc + 0.5f), 0, nlsc::kNumVariants - 1);
             ui->variant = idx;
+            if (ui->popup.is_open) popup_paint(ui);   // the open list marks the host's choice too
             break;
         }
         default: return;
@@ -1220,6 +1087,7 @@ int ui_idle(LV2UI_Handle handle)
 {
     auto* ui = static_cast<UI*>(handle);
     if (!ui->dpy || ui->x_dead) return 1;   // non-zero: the UI asks the host to close it
+    assert_handlers();
     while (!ui->x_dead && XPending(ui->dpy)) {
         XEvent ev;
         XNextEvent(ui->dpy, &ev);
@@ -1242,7 +1110,7 @@ int ui_idle(LV2UI_Handle handle)
     // Polled, not an event: under XWayland the grabs do not stop a Wayland
     // window taking the focus, and the FocusOut they raise also fires when the
     // grab is merely refused.
-    if (ui->x_dead) return 1;
+    if (ui->x_dead || ui->win_gone) return 1;
     if (ui->popup.is_open) {
         Window fw = 0; int revert = 0;
         XGetInputFocus(ui->dpy, &fw, &revert);

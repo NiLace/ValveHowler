@@ -81,9 +81,9 @@ PHOTO := $(sort $(notdir $(wildcard gui/photo/*.png)))
 # Rebuild when the flags change, not only when a source does.
 FLAGSTAMP := $(BUILD)/.flags
 $(shell mkdir -p $(BUILD); \
-        printf '%s|%s|%s|%s|%s\n' "$(CXXFLAGS)" "$(LDFLAGS)" "$(LDLIBS)" "$(ARCH_V3)" "$(PRODFP)" \
+        printf '%s|%s|%s|%s|%s|%s\n' "$(CXXFLAGS)" "$(LDFLAGS)" "$(LDLIBS)" "$(ARCH_V3)" "$(PRODFP)" "$(CASCFG)" \
         | cmp -s - $(FLAGSTAMP) 2>/dev/null \
-        || printf '%s|%s|%s|%s|%s\n' "$(CXXFLAGS)" "$(LDFLAGS)" "$(LDLIBS)" "$(ARCH_V3)" "$(PRODFP)" > $(FLAGSTAMP))
+        || printf '%s|%s|%s|%s|%s|%s\n' "$(CXXFLAGS)" "$(LDFLAGS)" "$(LDLIBS)" "$(ARCH_V3)" "$(PRODFP)" "$(CASCFG)" > $(FLAGSTAMP))
 
 .PHONY: all bundle gui install test clean
 all: bundle

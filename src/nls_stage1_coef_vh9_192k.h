@@ -15,7 +15,7 @@
 #pragma once
 
 namespace nlsc {
-namespace stage1_od9 {
+namespace stage1_vh9 {
 
 static constexpr double kFs = 192000.0;
 
@@ -99,5 +99,5 @@ static constexpr double kWS[] = {
     +9.10229013680464560e-06,
 };
 
-} // namespace stage1_od9
+} // namespace stage1_vh9
 } // namespace nlsc

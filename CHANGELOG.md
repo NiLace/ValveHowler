@@ -8,6 +8,24 @@ numbers.
 
 ---
 
+## 1.6.4 — 2026-11-01
+
+The fixes of an independent review of the whole plugin. The sound does not change at usual
+levels: the output is identical sample for sample to 1.6.2's on the reference material.
+
+- **The variants are now called VH-8 and VH-9** (W Tone and L Tone). Sessions keep their
+  variant: only the label changed.
+- **Closing the editor can no longer take the host down** when another library has replaced
+  the X error handler, and the editor no longer grows the host's memory each time it is
+  opened (about 0.3 MB per open before).
+- **The footswitch reads an invalid value as engaged**, like every other control reads its
+  default; before, it bypassed the pedal.
+- **An extreme, absurd input no longer makes the pedal work at a core's worth of CPU** while it
+  recovers.
+- **The bundle is smaller**: both box colours share one set of knob images.
+
+---
+
 ## 1.6.2 — 2026-11-01
 
 - **The editor shows the pedal again.** The 1.6.0 download was missing the four images of
@@ -87,7 +105,7 @@ Sessions saved with 1.4.0 load unchanged, and the sound is the same.
 
 Sessions saved with 1.0.0 load unchanged.
 
-- **The variants are renamed** OD-8 W Tone, OD-9 W Tone, OD-8 L Tone and OD-9 L Tone.
+- **The variants are renamed** VH-8 W Tone, VH-9 W Tone, VH-8 L Tone and VH-9 L Tone.
   Only the names change: a saved session picks up the variant it had.
 - **A new, rendered interface.** The panel is rendered from a 3D model of the pedal on a
   pedalboard: knobs that turn, a footswitch that goes down when pressed, and a backlit

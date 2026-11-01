@@ -52,8 +52,8 @@ using Real = double;
 // The circuit variants live in `nls_variantes.h`, the single source shared
 // by the DSP and the GUI (two distinct .so files).
 
-// The oversampling factor: 2x by default, 4x behind the `hq` port. Measured against the circuit
-// (`docs/measurements/factor_2026-10-25.md`): 2x passes everything played
+// The oversampling factor: 2x by default, 4x behind the `hq` port. Measured against the circuit:
+// 2x passes everything played
 // straight into the pedal and saves ~42 % of the engine's CPU; what 4x still
 // buys is the alias of a pinched harmonic. Both paths are built at
 // instantiate() (`Path`), and `hq` switches between them through the dry fade,
@@ -62,7 +62,7 @@ using Real = double;
 // 16x costs about half a core in the worst block for an alias figure 8x
 // already reaches.
 // `NLSC_OS_FACTOR_LO` / `_HI` exist for the gate's reference builds only
-// (`tools/hq_check.sh`: both paths at 4x is the 4x product, both at 2x the 2x).
+// (`make hq-check`: both paths at 4x is the 4x product, both at 2x the 2x).
 #ifndef NLSC_OS_FACTOR_LO
 #  define NLSC_OS_FACTOR_LO 2
 #endif
@@ -95,16 +95,10 @@ struct Plugin : ::nlsc::ICore {
     int         hq_ = 0;                 // the path applied to the engine (0 = 2x, 1 = 4x)
     Oversampler& os()   { return os_[hq_]; }
     Cascade4&    cascade() { return casc_[hq_]; }
-#ifdef NLSC_RESTART_PROBE
-    // Test builds only (`harness/hq_switch.cpp`): how many times the circuit
-    // was re-initialised, and the largest wet share of the output at one.
-    long   restarts_ = 0;
-    double restart_mix_max_ = 0.0;
-#endif
 
     // Knob state already applied to the engine.
     double drive_ = -1.0, tone_ = -1.0, lvl_ = -1.0;   // −1 forces the first prepare
-    int    idx_var_ = 0;             // variant applied to the engine (0 = OD-8)
+    int    idx_var_ = 0;             // variant applied to the engine (0 = VH-8)
     bool   pending_ = true;
     // A MODE change is waiting for the fade to bottom out.
     bool   pending_mode_ = false;
@@ -203,7 +197,7 @@ struct Plugin : ::nlsc::ICore {
     }
 
     // The DRIVE pot's law. The port is a knob position (0..1); the netlist
-    // wants a resistance fraction. The TS GAIN pot is a 500K logarithmic
+    // wants a resistance fraction. The circuit's GAIN pot is a 500K logarithmic
     // (audio, "A") taper; with a linear law the useful travel would bunch into
     // the first quarter of the knob.
     //
@@ -215,7 +209,7 @@ struct Plugin : ::nlsc::ICore {
     //     x ≤ ½ :  y = 2·m·x                    (gentle segment)
     //     x > ½ :  y = m + 2·(1−m)·(x−½)        (fast segment)
     //
-    // Midpoint m = 0.161: it reproduces the published THD of a real TS with the
+    // Midpoint m = 0.161: it reproduces the published THD of the real pedal with the
     // drive at the mechanical midpoint (Open Heart, 4.18 %), and lies within a
     // pot's typical ±20 % taper tolerance of the A3 spec.
     static constexpr double kTaperMid = 0.161;   // mid-travel fraction
@@ -228,7 +222,7 @@ struct Plugin : ::nlsc::ICore {
                           : kTaperMid + 2.0 * (1.0 - kTaperMid) * (x - 0.5);
     }
 
-    // The TONE pot's "W" taper. The TS tone pot is not linear: ElectroSmash
+    // The TONE pot's "W" taper. The tone pot is not linear: ElectroSmash
     // calls it "G", the GGG schematic prints `20KG`, pedalparts `20KW`, and the
     // manufacturer's service manual lists a 20KG part.
     //
@@ -416,10 +410,6 @@ struct Plugin : ::nlsc::ICore {
     // factor is switched first, so `apply_knobs` prepares the path that will run.
     void restart(double drive, double tone, double level, int idx_var, int hq)
     {
-#ifdef NLSC_RESTART_PROBE
-        ++restarts_;
-        if (!pending_ && mix_ > restart_mix_max_) restart_mix_max_ = mix_;
-#endif
         hq_ = hq;
         apply_knobs(drive, tone, level, idx_var, true);
         knob_land(drive, tone, level);
@@ -515,7 +505,10 @@ struct Plugin : ::nlsc::ICore {
         //
         // The dry's delay must equal the latency just published: the taps are a
         // build setting, and a mismatched delay would comb-filter.
-        const bool active  = read_port(ctl[PORT_ENABLED], 1.0) >= 0.5;
+        // A non-finite value is the .ttl default (engaged), as for every other port:
+        // NaN >= 0.5 is false and would read as a bypass.
+        const double en    = read_port(ctl[PORT_ENABLED], 1.0);
+        const bool active  = !std::isfinite(en) || en >= 0.5;
         // A pending mode change ramps down like a bypass: same path, which
         // is why there is no second fade that could diverge.
         const double target = (active && !pending_mode_) ? 1.0 : 0.0;
@@ -620,6 +613,7 @@ struct Plugin : ::nlsc::ICore {
 #define NLSC_KNOB_TAU 0.070
 #endif
     static constexpr uint32_t kKnobStep = NLSC_KNOB_STEP;  // samples between applications
+    static_assert(kKnobStep > 0, "the knob step must be at least one sample, or process() never advances");
     static constexpr double   kKnobTau  = NLSC_KNOB_TAU;   // s, one-pole glide
     static constexpr double   kKnobSnap = 1.0e-4;   // land exactly within this
 #ifndef NLSC_KNOB_LOGIT
